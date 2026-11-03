@@ -45,8 +45,13 @@ else
   PLATFORM := $(shell uname -s | tr A-Z a-z)-$(shell uname -m)
 endif
 
-FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c
 FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC))
+ifeq ($(WINDOWS),1)
+  # executable icon + version info (Explorer, taskbar)
+  WINDRES ?= windres
+  FRONTEND_OBJ += $(BUILD)/fe_resources.o
+endif
 
 .PHONY: all headless recomp startropics test cosim dist clean
 
@@ -90,6 +95,10 @@ $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 $(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) -Iruntime -c $< -o $@
+
+$(BUILD)/fe_resources.o: frontend/startropics.rc frontend/startropics.ico
+	@mkdir -p $(BUILD)
+	$(WINDRES) -I frontend $< -O coff -o $@
 
 # ---- distributable package: the executable plus the player notes ----
 dist: $(BUILD)/startropics$(EXE)

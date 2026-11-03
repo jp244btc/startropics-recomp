@@ -7,6 +7,7 @@
 #include "nes.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -62,6 +63,46 @@ static void sha1(const uint8_t *data, size_t len, uint8_t out[20]) {
         out[i * 4] = (uint8_t)(h[i] >> 24); out[i * 4 + 1] = (uint8_t)(h[i] >> 16);
         out[i * 4 + 2] = (uint8_t)(h[i] >> 8); out[i * 4 + 3] = (uint8_t)h[i];
     }
+}
+
+/* ---- MD5 (RFC 1321) ---- */
+static void md5(const uint8_t *data, size_t len, uint8_t out[16]) {
+    static const uint8_t R[64] = { 7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22, 5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+                                   4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23, 6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21 };
+    static uint32_t K[64];
+    static int k_ready;
+    if (!k_ready) { for (int i = 0; i < 64; i++) K[i] = (uint32_t)(fabs(sin((double)(i + 1))) * 4294967296.0); k_ready = 1; }
+    uint32_t h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476;
+    size_t padded = ((len + 8) / 64 + 1) * 64;
+    uint8_t *buf = calloc(padded, 1);
+    memcpy(buf, data, len);
+    buf[len] = 0x80;
+    uint64_t bits = (uint64_t)len * 8;
+    for (int i = 0; i < 8; i++) buf[padded - 8 + i] = (uint8_t)(bits >> (8 * i));
+    for (size_t off = 0; off < padded; off += 64) {
+        uint32_t M[16];
+        for (int i = 0; i < 16; i++)
+            M[i] = (uint32_t)buf[off + i * 4] | (uint32_t)buf[off + i * 4 + 1] << 8 |
+                   (uint32_t)buf[off + i * 4 + 2] << 16 | (uint32_t)buf[off + i * 4 + 3] << 24;
+        uint32_t a = h0, b = h1, c = h2, d = h3;
+        for (int i = 0; i < 64; i++) {
+            uint32_t f;
+            int g;
+            if (i < 16)      { f = (b & c) | (~b & d); g = i; }
+            else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) & 15; }
+            else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) & 15; }
+            else             { f = c ^ (b | ~d); g = (7 * i) & 15; }
+            uint32_t t = d;
+            d = c; c = b;
+            uint32_t x = a + f + K[i] + M[g];
+            b = b + ((x << R[i]) | (x >> (32 - R[i])));
+            a = t;
+        }
+        h0 += a; h1 += b; h2 += c; h3 += d;
+    }
+    free(buf);
+    uint32_t h[4] = { h0, h1, h2, h3 };
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(h[i] >> (8 * j));
 }
 
 static uint32_t crc32_calc(const uint8_t *d, size_t n) {
@@ -138,6 +179,8 @@ int cart_load(const char *path) {
     }
     sha1(data + off, cart.prg_size + cart.chr_size, cart.sha1);
     for (int i = 0; i < 20; i++) sprintf(cart.sha1_hex + i * 2, "%02x", cart.sha1[i]);
+    md5(data + off, cart.prg_size + cart.chr_size, cart.md5);
+    for (int i = 0; i < 16; i++) sprintf(cart.md5_hex + i * 2, "%02x", cart.md5[i]);
     cart.crc32 = crc32_calc(data + off, cart.prg_size + cart.chr_size);
     free(data);
 

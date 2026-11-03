@@ -14,7 +14,7 @@ typedef struct ui_item {
     int nchoices;
     int min, max, step;           /* INT */
     const char *suffix;           /* INT: text after the number */
-    char info[320];               /* INFO: free text, '\n' separates lines */
+    char info[400];               /* INFO: free text, '\n' separates lines */
     int *pad;                     /* KEY: optional game-controller button bound alongside the key (-1 = none) */
 } ui_item;
 

@@ -103,7 +103,7 @@ void ui_draw(SDL_Renderer *r, ui_menu *m, int ww, int wh) {
         ui_item *it = &t->items[i];
         if (it->kind == UI_INFO) {
             /* multi-line dim text */
-            char buf[320];
+            char buf[400];
             snprintf(buf, sizeof buf, "%s", it->info);
             int small = s > 1 ? s - 1 : 1;
             if (s >= 4) small = s - 1; else if (s >= 2) small = s - 1; else small = 1;

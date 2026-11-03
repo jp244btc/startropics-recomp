@@ -40,6 +40,8 @@ typedef struct {
     int      mirroring;     /* 0 = horizontal, 1 = vertical (header value) */
     uint8_t  sha1[20];      /* SHA-1 of the ROM image without the header */
     char     sha1_hex[41];
+    uint8_t  md5[16];       /* MD5 of the same data, for display and cross-checking against databases */
+    char     md5_hex[33];
     uint32_t crc32;         /* CRC32 of the ROM image without the header */
     char     path[1024];
 } cart_t;

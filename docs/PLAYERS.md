@@ -45,6 +45,16 @@ saves/<rom name>.state   save state (F5 / F8)
 screenshots/             F12 screenshots
 startropics.ini          settings and the remembered ROM path
 
+These live next to startropics.exe when that folder is writable. If it is not
+(Program Files, a read-only location, or the program was started from inside
+the zip without extracting it), they go to
+%APPDATA%\StarTropicsPort\StarTropics\ instead; the ROM you chose is remembered
+either way. Extract the zip to a normal folder for portable use.
+
+The ROM is verified by its hash before it is accepted: the ROM tab shows the
+SHA-1, MD5 and CRC32 of your file and whether it matches a known StarTropics
+cartridge dump. Anything else is refused.
+
 Legal
 -----
 StarTropics is a trademark and copyright of Nintendo. This port is an unofficial

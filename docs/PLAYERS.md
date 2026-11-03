@@ -21,7 +21,8 @@ Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
               2560x1600, 3840x2160: the window size, the display mode in exclusive
               fullscreen, or the size the picture is rendered at in fullscreen),
               window size 1x-6x (when the resolution is Auto),
-              scaling (integer / fit window / stretch (distorts)),
+              scaling (integer: exact pixel multiples, may leave borders / fit: fills
+              the screen, keeps the shape / stretch: fills, distorts),
               aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 or 16:10 widescreen:
               the overworld map is decoded beside the picture, other scenes get
               black bars, nothing is stretched),
@@ -31,7 +32,12 @@ Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
               sprite limit (8 per line as on the console, or unlimited: no flicker
               when many sprites share a line),
               low-latency sync (phase-locks to the display), run-ahead (0-3 frames;
-              2 cancels the game's own input lag)
+              2 cancels the game's own input lag).
+              The line under the rows says what the settings produce (for example
+              "Picture 2560x1440 in the 2560x1600 display mode") and why there are
+              borders or bars when there are: Integer only uses whole multiples of
+              the NES picture, and a 16:9 picture leaves bars on a 16:10 screen (the
+              16:10 aspect fills it).
 Audio         Volume, latency preset (Low / Normal / Safe)
 Controls      Rebind the eight NES buttons and the rewind key (select a row, press
               Enter, press the key or pad button)

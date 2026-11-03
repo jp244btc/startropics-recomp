@@ -36,7 +36,7 @@ instead (no artwork is bundled: Nintendo's promotional art cannot be shipped).
 Options (all saved to `startropics.ini`): windowed / fullscreen / exclusive
 fullscreen, resolution presets (720p, 1280x800, 1080p, 1440p, 2560x1600, 4K: the
 window size, the exclusive display mode, or the render size in borderless
-fullscreen), window size 1x-6x, scaling (integer / fit window / stretch), aspect
+fullscreen), window size 1x-6x, scaling (integer / fit / stretch), aspect
 ratio (square pixels 8:7, 4:3 CRT, 16:9 or 16:10 widescreen: below), filter
 (nearest / linear / sharp), CRT-style shaders (scanlines, aperture mask, glow,
 curvature; three strengths), overscan crop, a no-sprite-limit mode (every sprite
@@ -44,7 +44,11 @@ on a line is drawn, so nothing flickers), volume, and rebinding of the eight NES
 buttons and the rewind key. Nine save state slots, rewind (hold a key to step
 back through the last minutes of play) and RetroAchievements (log in on the
 Achievements tab; unlocks pop up in game; hardcore mode supported) are built in.
-Esc in game opens the same menu as a pause screen. XInput and other gamepads are handled through SDL's game
+A line under the Graphics rows reports the picture the settings produce and why it
+does not fill the screen when it does not (integer multiples, or a 16:9 picture on a
+16:10 screen). The window works in real pixels on high-DPI displays (per-monitor DPI
+aware), so a 1920x1080 preset is 1920x1080 pixels. Esc in game opens the same menu
+as a pause screen. XInput and other gamepads are handled through SDL's game
 controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
 the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
 a generic joystick layout, and `startropics --list-controllers out.txt` writes

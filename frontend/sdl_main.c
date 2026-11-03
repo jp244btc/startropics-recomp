@@ -87,7 +87,7 @@ typedef struct {
 static config_t cfg = {
     .key = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE },
     .pad = { -1, -1, -1, -1, -1, -1, -1, -1, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
-    .window_size = 3, .display_mode = 0, .resolution = 0, .scaling = 0, .aspect = 1, .filter = 2,
+    .window_size = 3, .display_mode = 0, .resolution = 0, .scaling = 1, .aspect = 1, .filter = 2,
     .shader = 0, .shader_strength = 1, .overscan = 1, .no_sprite_limit = 0, .volume = 100,
     .lowlat = 1, .runahead = 2, .audio_latency = 1, .rewind = 1, .state_slot = 1, .ra_hardcore = 0, .rom = ""
 };
@@ -96,7 +96,7 @@ static const char *const display_modes[] = { "Windowed", "Fullscreen", "Fullscre
 static const char *const runahead_names[] = { "Off", "1 frame", "2 frames", "3 frames" };
 static const char *const latency_names[]  = { "Low", "Normal", "Safe" };
 static const char *const window_sizes[]  = { "1x", "2x", "3x", "4x", "5x", "6x" };
-static const char *const scalings[]      = { "Integer", "Fit window", "Stretch (distorts)" };
+static const char *const scalings[]      = { "Integer (exact pixels)", "Fit (fills the screen)", "Stretch (distorts)" };
 static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (widescreen)", "16:10 (widescreen)" };
 static const char *const filters[]       = { "Nearest", "Linear", "Sharp" };
 static const char *const onoff[]         = { "Off", "On" };
@@ -168,7 +168,7 @@ static double refresh_hz;             /* reported display refresh rate, 0 if unk
 enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT, ACT_RA_LOGIN,
        GFX_CHANGED, AUD_CHANGED, LAT_CHANGED, KEY_CHANGED, SLOT_CHANGED, RA_CHANGED, RA_TEXT };
 enum { TAB_PLAY, TAB_GFX, TAB_AUDIO, TAB_CONTROLS, TAB_RA, TAB_ROM, N_TABS };
-static ui_item play_items[8], gfx_items[12], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
+static ui_item play_items[8], gfx_items[13], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
 static ui_tab tabs[N_TABS];
 static ui_menu menu;
 
@@ -292,7 +292,7 @@ static void write_config(void) {
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen, 2 fullscreen exclusive\n", cfg.display_mode);
     fprintf(f, "resolution=%d          ; 0 auto (window size), 1 1280x720, 2 1280x800, 3 1920x1080, 4 2560x1440, 5 2560x1600, 6 3840x2160\n", cfg.resolution);
-    fprintf(f, "scaling=%d             ; 0 integer, 1 fit window, 2 stretch (distorts)\n", cfg.scaling);
+    fprintf(f, "scaling=%d             ; 0 integer (exact pixels, may leave borders), 1 fit (fills the screen), 2 stretch (distorts)\n", cfg.scaling);
     fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen, 3 16:10 widescreen (map decoded beside the picture, black bars elsewhere)\n", cfg.aspect);
     fprintf(f, "filter=%d              ; 0 nearest, 1 linear, 2 sharp\n", cfg.filter);
     fprintf(f, "shader=%d              ; 0 off, 1 scanlines, 2 CRT, 3 CRT curved, 4 glow\n", cfg.shader);
@@ -1039,6 +1039,39 @@ static void refresh_play_items(void) {
     else snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: empty.   In game F6 / F7 change the slot.", cfg.state_slot);
 }
 
+/* the Graphics tab's explanation line: the picture the current settings produce, and why it
+   does not fill the output when it does not */
+static void refresh_gfx_info(void) {
+    if (!renderer) return;
+    int ww, wh;
+    SDL_GetRendererOutputSize(renderer, &ww, &wh);
+    int out_w = ww, out_h = wh;
+    const char *where = cfg.display_mode == 2 ? "display mode" : cfg.display_mode == 1 ? "screen" : "window";
+    if (cfg.display_mode == 1 && cfg.resolution > 0 && cfg.resolution < N_RESOLUTIONS) {
+        out_w = resolutions[cfg.resolution].w; out_h = resolutions[cfg.resolution].h; where = "render size";
+    }
+    gfx_items[2].label = cfg.resolution ? "Window size (unused: resolution is set)" : "Window size";
+    SDL_Rect src, dst;
+    source_rect(&src);
+    dest_rect(out_w, out_h, &src, &dst);
+    int full_w = dst.w >= out_w - 1, full_h = dst.h >= out_h - 1;
+    char why[300] = "";
+    if (!full_w || !full_h) {
+        /* short lines: the info font has room for about 60 characters */
+        double ratio = (double)out_w / out_h;
+        int match = ratio > 1.7 ? 2 : ratio > 1.55 ? 3 : 1;      /* the aspect choice shaped like this output */
+        if (cfg.scaling == 0 && !full_w && !full_h)
+            snprintf(why, sizeof why, "\nBorders: Integer only uses whole multiples.\nFit uses the whole height.");
+        else if (match != cfg.aspect)
+            snprintf(why, sizeof why, "\n%s: the picture is %s than the %s.\nThe %s aspect matches its shape.",
+                     full_w ? "Bars above and below" : "Bars at the sides", full_w ? "wider" : "taller", where, aspects[match]);
+        else if (cfg.scaling == 0)
+            snprintf(why, sizeof why, "\nInteger rounds down to a whole multiple.\nFit fills the %s.", where);
+    }
+    snprintf(gfx_items[12].info, sizeof gfx_items[12].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s",
+             dst.w, dst.h, out_w, out_h, where, (double)dst.h / src.h, why);
+}
+
 static void refresh_ra_items(void) {
     if (!ach_available()) return;
     ra_items[3].label = ach_logged_in() ? "Log out" : "Log in";
@@ -1083,6 +1116,7 @@ static void build_menu(void) {
     g[9] = (ui_item){ "Sprite limit", UI_CHOICE, GFX_CHANGED, &cfg.no_sprite_limit, sprite_limits, 2, 0, 0, 0, NULL, "", NULL };
     g[10] = (ui_item){ "Low-latency sync", UI_CHOICE, GFX_CHANGED, &cfg.lowlat, onoff, 2, 0, 0, 0, NULL, "", NULL };
     g[11] = (ui_item){ "Run-ahead", UI_CHOICE, GFX_CHANGED, &cfg.runahead, runahead_names, 4, 0, 0, 0, NULL, "", NULL };
+    g[12] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     ui_item *a = aud_items;
     a[0] = (ui_item){ "Volume", UI_INT, AUD_CHANGED, &cfg.volume, NULL, 0, 0, 100, 5, "%", "", NULL };
@@ -1121,7 +1155,7 @@ static void build_menu(void) {
     rom_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     tabs[TAB_PLAY] = (ui_tab){ "Play", play_items, 8, 0 };
-    tabs[TAB_GFX] = (ui_tab){ "Graphics", gfx_items, 12, 0 };
+    tabs[TAB_GFX] = (ui_tab){ "Graphics", gfx_items, 13, 0 };
     tabs[TAB_AUDIO] = (ui_tab){ "Audio", aud_items, 3, 0 };
     tabs[TAB_CONTROLS] = (ui_tab){ "Controls", ctl_items, K_TOTAL + 3, 0 };
     tabs[TAB_RA] = (ui_tab){ "Achievements", ra_items, ach_available() ? 7 : 1, 0 };
@@ -1134,6 +1168,7 @@ static void build_menu(void) {
     menu.hover_tab = menu.hover_item = -1;
     refresh_rom_items();
     refresh_ra_items();
+    refresh_gfx_info();
 }
 
 static void open_menu(void) {
@@ -1220,6 +1255,7 @@ static void draw_menu(void) {
     }
     menu.backdrop = have_backdrop;
     if (menu.tab == TAB_RA) refresh_ra_items();
+    if (menu.tab == TAB_GFX) refresh_gfx_info();
     ui_draw(renderer, &menu, ww, wh);
     draw_overlays(0);
 }
@@ -1303,6 +1339,12 @@ int main(int argc, char **argv) {
         else rom_arg = argv[i];
     }
 
+#ifdef _WIN32
+    /* work in the display's real pixels: without this Windows scales the whole window by the
+       desktop's 125 % / 150 % setting, which blurs the picture and makes the window and
+       resolution presets land at the wrong size */
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -1316,8 +1358,18 @@ int main(int argc, char **argv) {
     if (bp) SDL_free(bp);
     choose_data_dir();
     snprintf(ini_path, sizeof ini_path, "%sstartropics.ini", data_dir);
+    int first_run = !file_exists(ini_path);
     load_config();
-    if (!file_exists(ini_path)) write_config();
+    if (first_run) {
+        /* a window that takes about 80 % of the screen's height, in whole multiples */
+        SDL_DisplayMode dm;
+        if (SDL_GetDesktopDisplayMode(0, &dm) == 0 && dm.h > 0) {
+            int k = (int)(dm.h * 0.8 / (FB_H - 2 * OVERSCAN));
+            cfg.window_size = k < 2 ? 2 : k > 6 ? 6 : k;
+            window_size_idx = cfg.window_size - 1;
+        }
+        write_config();
+    }
     if (stats_path) stats_file = nes_fopen(stats_path, "w");
 
     apu_set_sample_rate(SAMPLE_RATE);

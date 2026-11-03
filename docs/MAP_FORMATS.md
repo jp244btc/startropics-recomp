@@ -14,7 +14,7 @@ checked against the PPU's own nametables (`--widescreen`, below).
 
 | address | meaning |
 |---|---|
-| `$00` | game mode: 0 = field engine (overworld, title beach), 2 and 3+ = other scene types (dungeons use the bank 23/25/26/27 routine set) |
+| `$00` | game mode: 0 = island overworld (also the title beach), 1 = town (Coralcola: the same field engine with another map set), 2 and 3+ = other scene types (dungeons use the bank 23/25/26/27 routine set); the NMI dispatcher at `$80C2` runs the same per-frame routines for 0 and 1 |
 | `$28` | scene / IRQ task mode 0-4 (`$2A` with bit 7 set requests a change); 0 = overworld |
 | `$32/$33` | player X in world pixels (16-bit) |
 | `$34/$35` | player Y: low byte 0-239 inside a screen row, high byte = screen row (Y = hi x 240 + lo; the helpers at `$9312`/`$9318` wrap the low byte at 240) |
@@ -35,7 +35,9 @@ checked against the PPU's own nametables (`--widescreen`, below).
 | `$052F-$057F` | NMI VRAM update buffer (section 2) |
 | `$0580-$05FF` | shadow attribute tables for nametables 0 and 1 (64 bytes each) |
 
-Chapter 1 sets `$0132` = 1, `$0133` = 0 (bank 30, `$9593`). The title screen
+Chapter 1's island sets `$0132` = 1, `$0133` = 0 (bank 30, `$9593`); entering
+Coralcola switches to game mode 1 with `$0132` = 2, `$0133` = 0 (the village
+is its own 2 x 2-screen map set with the same grid layout). The title screen
 and attract mode use the same engine with bank 4 and header offsets `$48` /
 `$50` (bank 25, `$B919` / `$B715`), which is why the beach under the logo also
 decodes.
@@ -125,7 +127,7 @@ Six bytes per metatile at `metatiles + id * 6` (`$91FE`):
 
 | byte | meaning |
 |---|---|
-| 0 | collision / terrain flags (bit 0 = blocked for walking, see `$A1D1` in bank 29; other bits select water, cliffs, entrances) |
+| 0 | collision / terrain: bit 0 set = walkable (`$A1D1`, bank 29; collision is tested on the raw metatile, before variants); bits 3-5 = zone event raised when stepped into (`$B175`: `$08` enter a town or hut, `$18` leave, `$30` with `$47` set); bits 1-2 water / cliff types |
 | 1 | bits 7-5: variant group; bits 4-2: alternate index; bits 1-0: palette (attribute bits) |
 | 2, 3 | top-left, top-right CHR tile |
 | 4, 5 | bottom-left, bottom-right CHR tile |
@@ -142,6 +144,18 @@ those of the metatile finally chosen.
 
 **Attributes**: the palette of each metatile goes into the shadow attribute
 tables (`$922F`), so every 16 x 16 attribute cell is exactly one metatile.
+
+**Hut interiors are a group layer.** In Coralcola the inside of a hut sits at
+the same world position as the hut: its floor, walls and door are group-`$20`
+metatiles whose alternates (indices 1 and 2) are the roof and wall patterns,
+and the exterior metatiles (group 0, alternate index 0) have the black
+metatile as alternate 0. Walking through the gap in a hut's front wall steps
+onto a group-`$20` cell: the game sets `$5B` bit 6 (both groups shown, the
+interior appears over the exterior) and redraws the screen strip by strip,
+then sets `$5D` = `$20` and redraws again, which turns everything outside the
+hut black. Leaving reverses it. `$5D`/`$5F` are updated by every step
+(`$A1DF`: `$5D` takes the group of the cell just left, `$5F` the flags of the
+new cell).
 
 ## 8. Drawing strips while walking
 
@@ -181,8 +195,13 @@ aspect choice shows the 341 pixels that make a 16:9 picture at the 4:3 CRT pixel
 shape, so the normal picture sits between black bars wherever the bands are
 blank) by decoding the map around the camera:
 
-1. The scene must be mode 0 with the field engine active (`$00` = 0,
-   `$28` = 0) and the background enabled on line 0.
+1. The scene must be the field engine in IRQ mode 0 (`$00` = 0 island or 1
+   town, `$28` = 0) with the background enabled on line 0. Hut interiors need
+   nothing extra: the variant rules above are applied with the current
+   `$5B`/`$5D`/`$5F`, so inside a hut the bands are black like the game's own
+   exterior. During the game's redraw wipe when a hut opens or closes (about
+   40 frames) the centre is still being rewritten strip by strip while the bands
+   already show the final state; the self-check reports those frames.
 2. The camera is the player position minus 128 in both axes, corrected by the
    scroll the PPU actually used for the frame (snapshotted with the CHR banks
    and `$2000` at scanline 0): the step animation can leave the scroll one
@@ -200,6 +219,9 @@ exist only inside the picture, so there are no sprites to draw there, and a
 tile the game changed in VRAM directly (opened passages, the landing boat)
 appears when it scrolls into the centre, not in the bands. Scenes with an
 unknown format (dungeons, menus, text screens, cutscenes) get black bands.
+Verified with the harness on the island, in Coralcola (0 of 41,216 tiles
+differ while walking around the village) and inside a hut (0 differ once
+the game's redraw has finished).
 
 Harness: `nes-headless --widescreen out.png` writes the wide frame (also
 every N frames with `--png-every`), checks that its centre is identical to

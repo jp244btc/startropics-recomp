@@ -4,8 +4,9 @@
  *
  * The NES picture is 256 pixels wide and the nametables hold nothing beyond
  * it, so a real widescreen view has to be rebuilt from the level data in the
- * ROM. This module knows the format of the overworld (the scrolling top-down
- * map; see docs/MAP_FORMATS.md): a 16x16 grid of 256x240 screens held in RAM,
+ * ROM. This module knows the format of the field engine's maps (the island
+ * overworld, Coralcola and its hut interiors; see docs/MAP_FORMATS.md): a
+ * 16x16 grid of 256x240 screens held in RAM,
  * each screen a list of 15 run-length coded rows of 16x16 metatiles in a
  * swappable PRG bank, and a table of 6-byte metatiles (collision, flags +
  * palette, four CHR tiles). The bands are drawn with the CHR banks, scroll
@@ -23,7 +24,7 @@
 #include <string.h>
 
 /* RAM locations of the overworld engine (StarTropics, USA) */
-#define RAM_GAME_MODE   0x00    /* 0 = field engine (overworld), 2+ = other scene types */
+#define RAM_GAME_MODE   0x00    /* field engine: 0 = island overworld, 1 = town (same engine, another map set); 2+ = other scene types */
 #define RAM_SCENE_MODE  0x28    /* IRQ task mode: 0 = overworld (blank bottom 16 lines) */
 #define RAM_PLAYER_X    0x32    /* 16-bit pixel position; the camera is 128 to the left */
 #define RAM_PLAYER_Y    0x34    /* lo = 0..239 within a screen row, hi = screen row */
@@ -131,7 +132,8 @@ static const row_cache_t *row_ids(mapset_t *m, int screen, int row) {
 
 /* Metatile variants, as the game's strip drawer ($8D8D in bank 30) picks them: a
    metatile whose group (flag bits 7-5) is not the current one is replaced by an
-   alternate from the map set's table. */
+   alternate from the map set's table. This is also how hut interiors work: inside,
+   $5D is the interior's group and the exterior resolves to the black metatile. */
 static uint8_t resolve_variant(mapset_t *m, uint8_t id) {
     uint8_t flags = ms_rd(m, m->metas + id * 6u + 1), grp = flags & 0xE0;
     uint8_t cur = ram[RAM_TILE_GROUP], cur2 = ram[RAM_TILE_GROUP2] & 0xE0;
@@ -162,7 +164,7 @@ static void lookup_cell(mapset_t *m, int wcol, int wrow, cell_t *c) {
 
 /* The scene check and the camera, shared by the renderer and the self-check. */
 static int overworld_setup(mapset_t *m, int *camx_out, int *camy_out) {
-    if (ram[RAM_GAME_MODE] != 0 || ram[RAM_SCENE_MODE] != 0) return 0;
+    if (ram[RAM_GAME_MODE] > 1 || ram[RAM_SCENE_MODE] != 0) return 0;
     if (!(ppu.line_emph[0] & 0x08)) return 0;              /* background off (fades, blanked frames) */
     unsigned banks = cart.prg_size / 8192;
     if (ram[RAM_MAP_BANK] >= banks) return 0;

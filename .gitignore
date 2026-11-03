@@ -1,0 +1,25 @@
+# Your own cartridge dump goes here; it is never committed.
+rom/*
+!rom/README.md
+
+# Everything derived from the ROM (recompiled C, listings) is generated locally.
+generated/*
+!generated/.gitignore
+
+# Build output and saves
+build/
+build-*/
+saves/
+screenshots/
+*.sav
+*.state
+*.o
+*.exe
+
+# External test ROMs (cloned by tests/get_test_roms.sh)
+tests/external/
+
+# Editor / OS noise
+*.swp
+.DS_Store
+Thumbs.db

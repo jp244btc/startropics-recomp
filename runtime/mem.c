@@ -1,0 +1,57 @@
+/*
+ * mem.c - CPU bus: PPU/APU registers, controllers, OAM DMA, PRG RAM,
+ * mapper registers. RAM and PRG ROM fast paths live inline in nes.h.
+ */
+#include "nes.h"
+
+sys_t sys;
+
+static uint8_t pad_read(int n) {
+    uint8_t bit;
+    if (sys.strobe) {
+        bit = sys.pad[n] & 1;
+    } else {
+        bit = sys.pad_shift[n] & 1;
+        sys.pad_shift[n] = (uint8_t)((sys.pad_shift[n] >> 1) | 0x80);
+    }
+    return (uint8_t)(0x40 | bit);
+}
+
+uint8_t mem_read_slow(uint16_t a) {
+    if (a < 0x4000) {
+        return ppu_reg_read(a & 7);
+    }
+    if (a < 0x4020) {
+        switch (a) {
+        case 0x4015: return apu_read_status();
+        case 0x4016: return pad_read(0);
+        case 0x4017: return pad_read(1);
+        default:     return cpu.open_bus;
+        }
+    }
+    if (a < 0x8000) return mapper_read_wram(a);
+    return mapper.prg_ptr[(a >> 13) & 3][a & 0x1fff];
+}
+
+void mem_write_slow(uint16_t a, uint8_t v) {
+    if (a < 0x2000) { ram[a & 0x7ff] = v; return; }
+    cpu.open_bus = v;
+    if (a < 0x4000) { ppu_reg_write(a & 7, v); return; }
+    if (a < 0x4020) {
+        if (a == 0x4014) { ppu_oam_dma(v); return; }
+        if (a == 0x4016) {
+            bool s = (v & 1) != 0;
+            if (sys.strobe && !s) {
+                sys.pad_shift[0] = sys.pad[0];
+                sys.pad_shift[1] = sys.pad[1];
+            }
+            sys.strobe = s;
+            if (s) { sys.pad_shift[0] = sys.pad[0]; sys.pad_shift[1] = sys.pad[1]; }
+            return;
+        }
+        apu_write(a, v);
+        return;
+    }
+    if (a < 0x8000) { mapper_write_wram(a, v); return; }
+    mapper_write_rom(a, v);
+}

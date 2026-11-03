@@ -1,0 +1,12 @@
+# Keep line endings consistent across Windows/MSYS2 and Linux checkouts.
+* text=auto
+Makefile text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.nes binary
+*.sav binary
+*.state binary
+*.png binary

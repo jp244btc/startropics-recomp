@@ -1,0 +1,6 @@
+; Address labels for StarTropics (USA). Format: ADDR name   (addresses in the fixed banks,
+; or any address when the label is only used for comments). Lines starting with ';' are ignored.
+; These are annotations written for this project; they contain no game data.
+FFA0 reset
+FFAD nmi
+FFB5 irq

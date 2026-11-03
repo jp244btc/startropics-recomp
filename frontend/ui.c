@@ -239,6 +239,8 @@ static int in_rect(const SDL_Rect *rc, int x, int y) {
 ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
     switch (e->type) {
     case SDL_KEYDOWN:
+        /* a held key auto-repeats; while binding, only a fresh press may be captured */
+        if (m->capture && e->key.repeat) return ev(UI_EV_NONE, 0);
         return key_action(m, e->key.keysym.sym);
     case SDL_CONTROLLERBUTTONDOWN:
         if (m->capture) {   /* binding a pad button to the selected row */

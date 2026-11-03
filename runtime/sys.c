@@ -94,7 +94,8 @@ int nes_state_load(const void *buf, size_t size) {
     sys.pad[0] = s->pad[0]; sys.pad[1] = s->pad[1];
     sys.pad_shift[0] = s->pad_shift[0]; sys.pad_shift[1] = s->pad_shift[1];
     sys.strobe = s->strobe != 0;
-    apu.ring_read = apu.ring_write = 0;
+    /* the audio ring and its indices are restored with the APU state, so a load
+       discards exactly the samples produced after the save (needed for run-ahead) */
     mapper_update_pointers();
     return 0;
 }

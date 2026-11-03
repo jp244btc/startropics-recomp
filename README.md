@@ -116,10 +116,27 @@ notes (`docs/PLAYERS.md`) into `dist/`.
 | NES | Keyboard | Gamepad (SDL) |
 |---|---|---|
 | D-pad | Arrow keys | D-pad / left stick |
-| A | X | A |
-| B | Z | B or X |
+| A (jump) | X | B (right face button, like the NES layout) |
+| B (attack) | Z | A (bottom face button) |
 | Start | Enter | Start |
 | Select | Right Shift | Back |
+
+Both the keys and the pad buttons are rebindable on the Controls tab (select a
+row, press Enter, then the new key or pad button). Every connected controller is
+opened and merged, so a pad that Windows exposes twice (Xbox over Bluetooth)
+works whichever instance reports input.
+
+### Latency
+
+The port is tuned to feel like real hardware or better; see
+[docs/LATENCY.md](docs/LATENCY.md) for the full breakdown. In short: the loop is
+phase-locked to the display's vertical blank and reads the controller about
+3 ms before each frame is presented (frame delay), the GPU queue is one frame
+deep, **run-ahead** (default 2 frames, the game's own reaction time) removes
+StarTropics' built-in input lag entirely, and audio sits at 25-45 ms with dynamic
+rate control. Exclusive fullscreen bypasses the desktop compositor. All of this is
+adjustable on the Graphics and Audio tabs, and `startropics --play --stats
+out.txt` logs the measured pacing once a second.
 
 Hotkeys: **Esc** menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
 **Tab** (hold) fast-forward, **P** pause, **F5** / **F8** save / load state, **F12**

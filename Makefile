@@ -38,14 +38,14 @@ GEN_OBJ := $(patsubst $(GEN)/%.c,$(BUILD)/gen/%.o,$(GEN_SRC))
 SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
 ifeq ($(WINDOWS),1)
   # single-file executable: SDL2 linked statically, no DLLs to ship
-  SDL_LIBS := $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -static-libgcc
+  SDL_LIBS := $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -ldxgi -static-libgcc
   PLATFORM := win64
 else
   SDL_LIBS := $(shell sdl2-config --libs 2>/dev/null)
   PLATFORM := $(shell uname -s | tr A-Z a-z)-$(shell uname -m)
 endif
 
-FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c
 FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC))
 
 .PHONY: all headless recomp startropics test cosim dist clean
@@ -87,7 +87,7 @@ $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
 	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(LDFLAGS)
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h frontend/font.h frontend/ui.h frontend/filedialog.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) -Iruntime -c $< -o $@
 

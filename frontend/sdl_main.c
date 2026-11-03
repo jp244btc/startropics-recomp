@@ -5,8 +5,10 @@
  * player selects their own cartridge dump; the same menu doubles as the pause
  * screen. Video: 256x240 frame presented with integer / fit / stretch scaling,
  * square-pixel / 4:3 / 16:9 aspect, nearest / linear / sharp filtering, in a
- * window or fullscreen. Audio: 48 kHz mono queued from the APU. Saves: battery
- * RAM and save states under saves/, screenshots under screenshots/.
+ * window or fullscreen. Audio: 48 kHz mono with dynamic rate control
+ * (audio_out.c). Input: keyboard plus every connected controller (input.c),
+ * both rebindable. Saves: battery RAM and save states under saves/,
+ * screenshots under screenshots/.
  *
  * No game data is bundled: the user's own .nes file is chosen at run time.
  */
@@ -31,14 +33,15 @@
 #include "font.h"
 #include "ui.h"
 #include "filedialog.h"
+#include "audio_out.h"
+#include "input.h"
+#include "gpu_sync.h"
 
 #define FB_W 256
 #define FB_H 240
 #define OVERSCAN 8
 #define NES_FPS 60.0988
 #define SAMPLE_RATE 48000
-#define AUDIO_MAX_QUEUE_MS 150
-#define AUDIO_PRIME_MS 80
 #define FAST_FORWARD_FRAMES 8
 
 /* ------------------------------------------------------------------ */
@@ -48,7 +51,8 @@ enum { K_A, K_B, K_SELECT, K_START, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_COUNT };
 static const char *const key_names[K_COUNT] = { "a", "b", "select", "start", "up", "down", "left", "right" };
 
 typedef struct {
-    int key[K_COUNT];
+    int key[K_COUNT];    /* SDL_Keycode per NES button */
+    int pad[K_COUNT];    /* SDL_GameControllerButton per NES button, -1 = none */
     int window_size;     /* 1..6 */
     int display_mode;    /* 0 windowed, 1 fullscreen */
     int scaling;         /* 0 integer, 1 fit, 2 stretch */
@@ -56,15 +60,21 @@ typedef struct {
     int filter;          /* 0 nearest, 1 linear, 2 sharp */
     int overscan;        /* crop 8 lines top/bottom */
     int volume;          /* 0..100 */
+    int lowlat;          /* 1: pace on the display's vblank with frame delay (60 Hz class displays) */
+    int runahead;        /* frames of run-ahead, 0..3 (the game's own input latency is 2) */
+    int audio_latency;   /* 0 low, 1 normal, 2 safe */
     char rom[2048];
 } config_t;
 
 static config_t cfg = {
     { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT },
-    3, 0, 0, 1, 2, 1, 100, ""
+    { -1, -1, -1, -1, -1, -1, -1, -1 },
+    3, 0, 0, 1, 2, 1, 100, 1, 2, 1, ""
 };
 
-static const char *const display_modes[] = { "Windowed", "Fullscreen" };
+static const char *const display_modes[] = { "Windowed", "Fullscreen", "Fullscreen (exclusive)" };
+static const char *const runahead_names[] = { "Off", "1 frame", "2 frames", "3 frames" };
+static const char *const latency_names[]  = { "Low", "Normal", "Safe" };
 static const char *const window_sizes[]  = { "1x", "2x", "3x", "4x", "5x", "6x" };
 static const char *const scalings[]      = { "Integer", "Fit window", "Stretch" };
 static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (stretched)" };
@@ -93,18 +103,20 @@ static SDL_Renderer *renderer;
 static SDL_Texture *game_tex;         /* 256x240 game frame */
 static SDL_Texture *sharp_tex;        /* integer-prescaled target for the sharp filter */
 static int sharp_k;
+static int tex_filter = -1;
 static SDL_Texture *bg_tex;           /* optional launcher-background.bmp next to the executable */
 static int bg_w, bg_h;
-static int tex_filter = -1;
-static SDL_AudioDeviceID audio_dev;
-static SDL_GameController *controller;   /* XInput / mapped pads through the game-controller API */
-static SDL_Joystick *joystick;           /* fallback: pads SDL has no mapping for */
-static char controller_name[160] = "none detected";
 static int window_size_idx = 2;       /* cfg.window_size - 1, for the menu */
+static int audio_ok;
+static FILE *stats_file;              /* --stats: frame pacing and audio queue log */
+static int pace_mode;                 /* 0 timer, 1 phase-locked to the display's vblank (WaitForVBlank), 2 vsynced Present */
+static int vsync_div = 1;             /* vblanks per game frame (2 on a 120 Hz display) */
+static double refresh_hz;             /* reported display refresh rate, 0 if unknown */
 
 /* menu */
-enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, GFX_CHANGED, AUD_CHANGED, KEY_CHANGED };
-static ui_item play_items[6], gfx_items[6], aud_items[2], ctl_items[K_COUNT + 2], rom_items[3];
+enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT,
+       GFX_CHANGED, AUD_CHANGED, LAT_CHANGED, KEY_CHANGED };
+static ui_item play_items[6], gfx_items[8], aud_items[3], ctl_items[K_COUNT + 3], rom_items[3];
 static ui_tab tabs[5];
 static ui_menu menu;
 
@@ -143,6 +155,19 @@ static char *trim(char *s) {
     return s;
 }
 
+/* absolute path for the remembered ROM, so a relative path given on the command line survives a double-click launch */
+static void absolute_path(const char *in, char *out, size_t n) {
+#ifdef _WIN32
+    wchar_t win[4096], wfull[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, in, -1, win, 4096) && GetFullPathNameW(win, 4096, wfull, NULL) &&
+        WideCharToMultiByte(CP_UTF8, 0, wfull, -1, out, (int)n, NULL, NULL)) return;
+#else
+    char *r = realpath(in, NULL);
+    if (r) { snprintf(out, n, "%s", r); free(r); return; }
+#endif
+    snprintf(out, n, "%s", in);
+}
+
 /* ------------------------------------------------------------------ */
 /* configuration file                                                  */
 /* ------------------------------------------------------------------ */
@@ -151,14 +176,19 @@ static void write_config(void) {
     if (!f) return;
     fputs("; StarTropics native port - settings (also editable from the in-game menu, Esc)\n", f);
     fprintf(f, "rom=%s\n", cfg.rom);
-    fputs("; key names are SDL key names: single letters/digits, or return, space, right shift, left ctrl, up, keypad 5 ...\n", f);
+    fputs("; keyboard: SDL key names (single letters/digits, or return, space, right shift, left ctrl, up, keypad 5 ...)\n", f);
     for (int i = 0; i < K_COUNT; i++) fprintf(f, "%s=%s\n", key_names[i], SDL_GetKeyName((SDL_Keycode)cfg.key[i]));
+    fputs("; gamepad buttons: A B X Y Back Start LB RB LS RS D-pad Up/Down/Left/Right, or none (left stick is always the d-pad)\n", f);
+    for (int i = 0; i < K_COUNT; i++) fprintf(f, "pad_%s=%s\n", key_names[i], input_pad_name(cfg.pad[i]));
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen\n", cfg.display_mode);
     fprintf(f, "scaling=%d             ; 0 integer, 1 fit window, 2 stretch\n", cfg.scaling);
     fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3, 2 16:9\n", cfg.aspect);
     fprintf(f, "filter=%d              ; 0 nearest, 1 linear, 2 sharp\n", cfg.filter);
     fprintf(f, "overscan=%d            ; crop 8 lines at the top and bottom\n", cfg.overscan);
+    fprintf(f, "low_latency=%d         ; pace on the display's vblank with frame delay (60/120 Hz displays)\n", cfg.lowlat);
+    fprintf(f, "runahead=%d            ; frames of run-ahead (0-3); StarTropics reacts 2 frames after a press\n", cfg.runahead);
+    fprintf(f, "audio_latency=%d       ; 0 low (~25 ms), 1 normal (~45 ms), 2 safe (~90 ms)\n", cfg.audio_latency);
     fprintf(f, "volume=%d\n", cfg.volume);
     fputs(";\n; Fixed keys: Esc = menu, Tab = fast-forward (hold), P = pause, F5 = save state, F8 = load state,\n"
           ";             F11 or Alt+Enter = fullscreen, F12 = screenshot, Ctrl+R = reset\n", f);
@@ -166,6 +196,7 @@ static void write_config(void) {
 }
 
 static void load_config(void) {
+    input_default_pads(cfg.pad);
     FILE *f = nes_fopen(ini_path, "r");
     if (!f) return;
     char line[2400];
@@ -186,6 +217,9 @@ static void load_config(void) {
                 SDL_Keycode k = SDL_GetKeyFromName(buf);
                 if (k != SDLK_UNKNOWN) cfg.key[i] = (int)k;
                 handled = 1;
+            } else if (!strncmp(key, "pad_", 4) && !strcmp(key + 4, key_names[i])) {
+                cfg.pad[i] = input_pad_from_name(val);
+                handled = 1;
             }
         }
         if (handled) continue;
@@ -196,6 +230,9 @@ static void load_config(void) {
         else if (!strcmp(key, "aspect")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.aspect = v; }
         else if (!strcmp(key, "filter")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.filter = v; }
         else if (!strcmp(key, "overscan")) cfg.overscan = atoi(val) ? 1 : 0;
+        else if (!strcmp(key, "low_latency")) cfg.lowlat = atoi(val) ? 1 : 0;
+        else if (!strcmp(key, "runahead")) { int v = atoi(val); if (v >= 0 && v <= 3) cfg.runahead = v; }
+        else if (!strcmp(key, "audio_latency")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.audio_latency = v; }
         else if (!strcmp(key, "volume")) { int v = atoi(val); if (v >= 0 && v <= 100) cfg.volume = v; }
         else if (!strcmp(key, "scale")) { int v = atoi(val); if (v >= 1 && v <= 6) cfg.window_size = v; }
     }
@@ -213,6 +250,9 @@ static double target_aspect(int src_h) {
     default: return (double)FB_W / src_h;
     }
 }
+
+/* width of a pixel relative to its height: square, or the 4:3 CRT look (the
+   "16:9 stretched" choice means the CRT look once the bands make the picture 16:9) */
 
 static void source_rect(SDL_Rect *src) {
     src->x = 0; src->y = cfg.overscan ? OVERSCAN : 0;
@@ -330,13 +370,44 @@ static void draw_backdrop_image(void) {
     SDL_RenderCopy(renderer, bg_tex, NULL, &dst);
 }
 
+/* Decide how frames are paced. On a display whose refresh is a multiple of
+   ~60 Hz the loop is phase-locked to its vertical blank (one game frame per
+   vblank, or per two vblanks on 120 Hz), presenting just before each one, and
+   the audio's rate control absorbs the 0.16% speed difference. Otherwise the
+   loop is paced by the timer with vsync off. */
+static void setup_sync(void) {
+    SDL_DisplayMode m;
+    refresh_hz = 0;
+    if (SDL_GetWindowDisplayMode(window, &m) == 0 && m.refresh_rate > 0) refresh_hz = m.refresh_rate;
+    pace_mode = 0; vsync_div = 1;
+    if (cfg.lowlat && refresh_hz > 0) {
+        int div = (int)(refresh_hz / 60.0 + 0.5);
+        if (div < 1) div = 1;
+        double per = refresh_hz / div;
+        if (fabs(per - NES_FPS) / NES_FPS < 0.025) {
+            vsync_div = div;
+            if (gpu_sync_vblank_init(window)) pace_mode = 1;
+            else if (SDL_RenderSetVSync(renderer, 1) == 0) pace_mode = 2;
+        }
+    }
+    if (pace_mode != 2) SDL_RenderSetVSync(renderer, 0);
+}
+
 static void apply_graphics(void) {
     cfg.window_size = window_size_idx + 1;
     Uint32 flags = SDL_GetWindowFlags(window);
-    int is_fs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
-    if (cfg.display_mode && !is_fs) SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
-    else if (!cfg.display_mode && is_fs) SDL_SetWindowFullscreen(window, 0);
-    if (!cfg.display_mode) {
+    int cur = ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
+    if (cur != cfg.display_mode) {
+        if (cfg.display_mode == 2) {
+            /* exclusive fullscreen at the desktop mode: no mode switch, but the compositor is bypassed */
+            SDL_DisplayMode dm;
+            if (SDL_GetDesktopDisplayMode(SDL_GetWindowDisplayIndex(window), &dm) == 0) SDL_SetWindowDisplayMode(window, &dm);
+            SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN);
+        } else {
+            SDL_SetWindowFullscreen(window, cfg.display_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+        }
+    }
+    if (cfg.display_mode == 0) {
         SDL_Rect src; source_rect(&src);
         int h = src.h * cfg.window_size;
         int w = (int)(h * target_aspect(src.h) + 0.5);
@@ -344,12 +415,24 @@ static void apply_graphics(void) {
         SDL_GetWindowSize(window, &cw, &ch);
         if (cw != w || ch != h) SDL_SetWindowSize(window, w, h);
     }
+    setup_sync();
     write_config();
 }
 
 static void toggle_fullscreen(void) {
-    cfg.display_mode = !cfg.display_mode;
+    cfg.display_mode = cfg.display_mode ? 0 : 1;
     apply_graphics();
+}
+
+/* sleep until the given performance-counter time, coarse SDL_Delay first, then a short spin */
+static void sleep_until(double target_ticks, double tick_ms) {
+    for (;;) {
+        double now = (double)SDL_GetPerformanceCounter();
+        double remaining_ms = (target_ticks - now) * tick_ms;
+        if (remaining_ms <= 0.05) break;
+        if (remaining_ms > 2.0) SDL_Delay(1);
+        /* else spin */
+    }
 }
 
 static int write_png_rgb32(const char *path, const uint32_t *px, int w, int h) {
@@ -396,24 +479,6 @@ static void update_title(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* audio                                                               */
-/* ------------------------------------------------------------------ */
-static void audio_pump(int muted) {
-    static int16_t buf[8192];
-    uint32_t n = apu_samples_available();
-    while (n > 0) {
-        uint32_t got = apu_read_samples(buf, n < 8192 ? n : 8192);
-        if (!got) break;
-        n -= got;
-        if (muted || !audio_dev) continue;
-        uint32_t queued = SDL_GetQueuedAudioSize(audio_dev);
-        if (queued > (uint32_t)(SAMPLE_RATE * AUDIO_MAX_QUEUE_MS / 1000) * sizeof(int16_t)) continue; /* drop */
-        if (cfg.volume != 100) for (uint32_t i = 0; i < got; i++) buf[i] = (int16_t)(buf[i] * cfg.volume / 100);
-        SDL_QueueAudio(audio_dev, buf, got * sizeof(int16_t));
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* saves                                                               */
 /* ------------------------------------------------------------------ */
 static void battery_check(int force) {
@@ -447,95 +512,10 @@ static void state_load(void) {
     fclose(f);
     if (n == len && nes_state_load(buf, len) == 0) {
         printf("state loaded: %s\n", state_path);
-        if (audio_dev) SDL_ClearQueuedAudio(audio_dev);
+        audio_out_clear();
         game_started = 1;
     } else fprintf(stderr, "save state %s is invalid for this build\n", state_path);
     free(buf);
-}
-
-/* ------------------------------------------------------------------ */
-/* input                                                               */
-/* ------------------------------------------------------------------ */
-static int key_down(const Uint8 *ks, int k) {
-    SDL_Scancode sc = SDL_GetScancodeFromKey((SDL_Keycode)k);
-    return sc != SDL_SCANCODE_UNKNOWN && ks[sc];
-}
-
-static uint8_t read_pad(void) {
-    const Uint8 *ks = SDL_GetKeyboardState(NULL);
-    uint8_t b = 0;
-    for (int i = 0; i < K_COUNT; i++) if (key_down(ks, cfg.key[i])) b |= (uint8_t)(1 << i);
-    if (controller) {
-        const int dead = 10000;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) b |= 0x01;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B)) b |= 0x02;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X)) b |= 0x02;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) b |= 0x04;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) b |= 0x08;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) b |= 0x10;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) b |= 0x20;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) b |= 0x40;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) b |= 0x80;
-        int ax = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
-        int ay = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
-        if (ax < -dead) b |= 0x40; else if (ax > dead) b |= 0x80;
-        if (ay < -dead) b |= 0x10; else if (ay > dead) b |= 0x20;
-    } else if (joystick) {
-        /* generic layout: buttons 0/1/2 = A/B/B, 6 = select, 7 = start, hat 0 = d-pad, axes 0/1 = stick */
-        const int dead = 10000;
-        int nb = SDL_JoystickNumButtons(joystick);
-        if (nb > 0 && SDL_JoystickGetButton(joystick, 0)) b |= 0x01;
-        if (nb > 1 && SDL_JoystickGetButton(joystick, 1)) b |= 0x02;
-        if (nb > 2 && SDL_JoystickGetButton(joystick, 2)) b |= 0x02;
-        if (nb > 6 && SDL_JoystickGetButton(joystick, 6)) b |= 0x04;
-        if (nb > 7 && SDL_JoystickGetButton(joystick, 7)) b |= 0x08;
-        if (SDL_JoystickNumHats(joystick) > 0) {
-            Uint8 h = SDL_JoystickGetHat(joystick, 0);
-            if (h & SDL_HAT_UP) b |= 0x10;
-            if (h & SDL_HAT_DOWN) b |= 0x20;
-            if (h & SDL_HAT_LEFT) b |= 0x40;
-            if (h & SDL_HAT_RIGHT) b |= 0x80;
-        }
-        if (SDL_JoystickNumAxes(joystick) > 1) {
-            int ax = SDL_JoystickGetAxis(joystick, 0), ay = SDL_JoystickGetAxis(joystick, 1);
-            if (ax < -dead) b |= 0x40; else if (ax > dead) b |= 0x80;
-            if (ay < -dead) b |= 0x10; else if (ay > dead) b |= 0x20;
-        }
-    }
-    return b;
-}
-
-static void refresh_controls_info(void);
-
-static void open_controller(void) {
-    if (controller || joystick) return;
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
-            controller = SDL_GameControllerOpen(i);
-            if (controller) {
-                snprintf(controller_name, sizeof controller_name, "%s", SDL_GameControllerName(controller));
-                printf("controller: %s\n", controller_name);
-                refresh_controls_info();
-                return;
-            }
-        }
-    }
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        joystick = SDL_JoystickOpen(i);
-        if (joystick) {
-            snprintf(controller_name, sizeof controller_name, "%s (generic mapping)", SDL_JoystickName(joystick));
-            printf("joystick: %s\n", controller_name);
-            refresh_controls_info();
-            return;
-        }
-    }
-}
-
-static void close_controllers(void) {
-    if (controller) { SDL_GameControllerClose(controller); controller = NULL; }
-    if (joystick) { SDL_JoystickClose(joystick); joystick = NULL; }
-    snprintf(controller_name, sizeof controller_name, "none detected");
-    refresh_controls_info();
 }
 
 /* diagnostic: --list-controllers [file] (a GUI-subsystem exe cannot always print to a console) */
@@ -551,19 +531,6 @@ static void list_controllers(const char *out_path) {
         if (m) { fprintf(out, "     %s\n", m); SDL_free(m); }
     }
     if (out != stdout) fclose(out);
-}
-
-/* absolute path for the remembered ROM, so a relative path given on the command line survives a double-click launch */
-static void absolute_path(const char *in, char *out, size_t n) {
-#ifdef _WIN32
-    wchar_t win[4096], wfull[4096];
-    if (MultiByteToWideChar(CP_UTF8, 0, in, -1, win, 4096) && GetFullPathNameW(win, 4096, wfull, NULL) &&
-        WideCharToMultiByte(CP_UTF8, 0, wfull, -1, out, (int)n, NULL, NULL)) return;
-#else
-    char *r = realpath(in, NULL);
-    if (r) { snprintf(out, n, "%s", r); free(r); return; }
-#endif
-    snprintf(out, n, "%s", in);
 }
 
 /* ------------------------------------------------------------------ */
@@ -618,6 +585,7 @@ static int load_rom_file(const char *path) {
     fflush(stdout);
     update_title();
     refresh_rom_items();
+    audio_out_clear();
     return 1;
 }
 
@@ -625,9 +593,9 @@ static int load_rom_file(const char *path) {
 /* menu                                                                */
 /* ------------------------------------------------------------------ */
 static void refresh_controls_info(void) {
-    snprintf(ctl_items[K_COUNT].info, sizeof ctl_items[K_COUNT].info,
-             "Select a row and press Enter, then the new key.\nGamepad: %.70s\n(A = A, B or X = B, Start, Back = Select, D-pad / left stick)",
-             controller_name);
+    snprintf(ctl_items[K_COUNT + 1].info, sizeof ctl_items[K_COUNT + 1].info,
+             "Select a row, press Enter, then press the new key or pad button.\nGamepad: %.70s\n(the left stick always works as the d-pad; Guide or LB opens this menu)",
+             input_controller_summary());
 }
 
 static void refresh_rom_items(void) {
@@ -641,41 +609,46 @@ static void refresh_rom_items(void) {
 
 static void build_menu(void) {
     ui_item *p = play_items;
-    p[0] = (ui_item){ "Start game", UI_ACTION, ACT_PLAY, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    p[1] = (ui_item){ "Reset game", UI_ACTION, ACT_RESET, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    p[2] = (ui_item){ "Save state  (F5)", UI_ACTION, ACT_SAVE, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    p[3] = (ui_item){ "Load state  (F8)", UI_ACTION, ACT_LOAD, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    p[4] = (ui_item){ "End game", UI_ACTION, ACT_STOP, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    p[5] = (ui_item){ "Quit", UI_ACTION, ACT_QUIT, NULL, NULL, 0, 0, 0, 0, NULL, "" };
+    p[0] = (ui_item){ "Start game", UI_ACTION, ACT_PLAY, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[1] = (ui_item){ "Reset game", UI_ACTION, ACT_RESET, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[2] = (ui_item){ "Save state  (F5)", UI_ACTION, ACT_SAVE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[3] = (ui_item){ "Load state  (F8)", UI_ACTION, ACT_LOAD, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[4] = (ui_item){ "End game", UI_ACTION, ACT_STOP, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[5] = (ui_item){ "Quit", UI_ACTION, ACT_QUIT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     ui_item *g = gfx_items;
-    g[0] = (ui_item){ "Display mode", UI_CHOICE, GFX_CHANGED, &cfg.display_mode, display_modes, 2, 0, 0, 0, NULL, "" };
-    g[1] = (ui_item){ "Window size", UI_CHOICE, GFX_CHANGED, &window_size_idx, window_sizes, 6, 0, 0, 0, NULL, "" };
-    g[2] = (ui_item){ "Scaling", UI_CHOICE, GFX_CHANGED, &cfg.scaling, scalings, 3, 0, 0, 0, NULL, "" };
-    g[3] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 3, 0, 0, 0, NULL, "" };
-    g[4] = (ui_item){ "Filter", UI_CHOICE, GFX_CHANGED, &cfg.filter, filters, 3, 0, 0, 0, NULL, "" };
-    g[5] = (ui_item){ "Overscan crop", UI_CHOICE, GFX_CHANGED, &cfg.overscan, onoff, 2, 0, 0, 0, NULL, "" };
+    g[0] = (ui_item){ "Display mode", UI_CHOICE, GFX_CHANGED, &cfg.display_mode, display_modes, 3, 0, 0, 0, NULL, "", NULL };
+    g[1] = (ui_item){ "Window size", UI_CHOICE, GFX_CHANGED, &window_size_idx, window_sizes, 6, 0, 0, 0, NULL, "", NULL };
+    g[2] = (ui_item){ "Scaling", UI_CHOICE, GFX_CHANGED, &cfg.scaling, scalings, 3, 0, 0, 0, NULL, "", NULL };
+    g[3] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 3, 0, 0, 0, NULL, "", NULL };
+    g[4] = (ui_item){ "Filter", UI_CHOICE, GFX_CHANGED, &cfg.filter, filters, 3, 0, 0, 0, NULL, "", NULL };
+    g[5] = (ui_item){ "Overscan crop", UI_CHOICE, GFX_CHANGED, &cfg.overscan, onoff, 2, 0, 0, 0, NULL, "", NULL };
+    g[6] = (ui_item){ "Low-latency sync", UI_CHOICE, GFX_CHANGED, &cfg.lowlat, onoff, 2, 0, 0, 0, NULL, "", NULL };
+    g[7] = (ui_item){ "Run-ahead", UI_CHOICE, GFX_CHANGED, &cfg.runahead, runahead_names, 4, 0, 0, 0, NULL, "", NULL };
 
     ui_item *a = aud_items;
-    a[0] = (ui_item){ "Volume", UI_INT, AUD_CHANGED, &cfg.volume, NULL, 0, 0, 100, 5, "%", "" };
-    a[1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "Audio: 48 kHz, NES mixer with the console's output filters." };
+    a[0] = (ui_item){ "Volume", UI_INT, AUD_CHANGED, &cfg.volume, NULL, 0, 0, 100, 5, "%", "", NULL };
+    a[1] = (ui_item){ "Latency", UI_CHOICE, LAT_CHANGED, &cfg.audio_latency, latency_names, 3, 0, 0, 0, NULL, "", NULL };
+    a[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
+                      "48 kHz with the NES mixer and output filters. Dynamic rate control\nholds the queue at the chosen latency; use Safe if sound stutters.", NULL };
 
-    static const char *const ctl_labels[K_COUNT] = { "A button", "B button", "Select", "Start", "Up", "Down", "Left", "Right" };
+    static const char *const ctl_labels[K_COUNT] = { "A (jump)", "B (attack)", "Select", "Start", "Up", "Down", "Left", "Right" };
     for (int i = 0; i < K_COUNT; i++)
-        ctl_items[i] = (ui_item){ ctl_labels[i], UI_KEY, KEY_CHANGED, &cfg.key[i], NULL, 0, 0, 0, 0, NULL, "" };
-    ctl_items[K_COUNT] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "" };
+        ctl_items[i] = (ui_item){ ctl_labels[i], UI_KEY, KEY_CHANGED, &cfg.key[i], NULL, 0, 0, 0, 0, NULL, "", &cfg.pad[i] };
+    ctl_items[K_COUNT] = (ui_item){ "Reset to defaults", UI_ACTION, ACT_KEYS_DEFAULT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    ctl_items[K_COUNT + 1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    ctl_items[K_COUNT + 2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
+        "In game: Esc menu, Tab fast-forward, P pause, F5/F8 states,\nF11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
     refresh_controls_info();
-    ctl_items[K_COUNT + 1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-        "In game: Esc menu, Tab fast-forward, P pause, F5/F8 states,\nF11 fullscreen, F12 screenshot, Ctrl+R reset." };
 
-    rom_items[0] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    rom_items[1] = (ui_item){ "Choose ROM file...", UI_ACTION, ACT_CHOOSE, NULL, NULL, 0, 0, 0, 0, NULL, "" };
-    rom_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "" };
+    rom_items[0] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    rom_items[1] = (ui_item){ "Choose ROM file...", UI_ACTION, ACT_CHOOSE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    rom_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     tabs[0] = (ui_tab){ "Play", play_items, 6, 0 };
-    tabs[1] = (ui_tab){ "Graphics", gfx_items, 6, 0 };
-    tabs[2] = (ui_tab){ "Audio", aud_items, 2, 0 };
-    tabs[3] = (ui_tab){ "Controls", ctl_items, K_COUNT + 2, 0 };
+    tabs[1] = (ui_tab){ "Graphics", gfx_items, 8, 0 };
+    tabs[2] = (ui_tab){ "Audio", aud_items, 3, 0 };
+    tabs[3] = (ui_tab){ "Controls", ctl_items, K_COUNT + 3, 0 };
     tabs[4] = (ui_tab){ "ROM", rom_items, 3, 1 };
     memset(&menu, 0, sizeof menu);
     menu.tabs = tabs; menu.ntabs = 5;
@@ -691,7 +664,7 @@ static void open_menu(void) {
     menu.tab = 0; menu.focus = 1; menu.capture = 0;
     ui_select_first(&menu);
     refresh_rom_items();
-    if (audio_dev) SDL_ClearQueuedAudio(audio_dev);
+    audio_out_clear();
 }
 
 static void start_game(void) {
@@ -699,11 +672,7 @@ static void start_game(void) {
     if (!game_started) nes_power();      /* the launcher's attract mode was running: begin fresh */
     game_started = 1;
     state = ST_GAME;
-    if (audio_dev) {
-        SDL_ClearQueuedAudio(audio_dev);
-        static int16_t silence[SAMPLE_RATE * AUDIO_PRIME_MS / 1000];
-        SDL_QueueAudio(audio_dev, silence, sizeof silence);
-    }
+    audio_out_clear();
 }
 
 static void choose_rom(void) {
@@ -723,6 +692,7 @@ static void menu_action(ui_event e) {
     }
     if (e.type == UI_EV_CHANGED) {
         if (e.id == GFX_CHANGED) apply_graphics();
+        else if (e.id == LAT_CHANGED) { audio_out_set_preset(cfg.audio_latency); write_config(); }
         else write_config();
         return;
     }
@@ -735,6 +705,12 @@ static void menu_action(ui_event e) {
     case ACT_STOP: if (rom_ok) { battery_check(1); nes_power(); game_started = 0; refresh_rom_items(); ui_select_first(&menu); } break;
     case ACT_QUIT: running = 0; break;
     case ACT_CHOOSE: choose_rom(); break;
+    case ACT_KEYS_DEFAULT: {
+        static const int def_keys[K_COUNT] = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT };
+        memcpy(cfg.key, def_keys, sizeof def_keys);
+        input_default_pads(cfg.pad);
+        write_config();
+        break; }
     default: break;
     }
 }
@@ -769,16 +745,16 @@ static void fatal_box(const char *msg) {
 }
 
 static void usage(void) {
-    printf("usage: startropics [rom.nes] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n");
+    printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
+           "                   [--list-controllers [out.txt]] [--stats out.txt]\n");
 }
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
     attach_parent_console();
 #endif
-    const char *rom_arg = NULL, *selftest_png = NULL, *uishot_png = NULL;
-    int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, list_pads = 0;
-    const char *list_pads_file = NULL;
+    const char *rom_arg = NULL, *selftest_png = NULL, *uishot_png = NULL, *list_pads_file = NULL, *stats_path = NULL;
+    int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, list_pads = 0, autoplay = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest") && i + 2 < argc) { selftest_frames = atoi(argv[i + 1]); selftest_png = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--ui-shot") && i + 1 < argc) {
@@ -788,6 +764,8 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (!strcmp(argv[i], "--list-controllers")) { list_pads = 1; if (i + 1 < argc) list_pads_file = argv[++i]; }
+        else if (!strcmp(argv[i], "--stats") && i + 1 < argc) stats_path = argv[++i];
+        else if (!strcmp(argv[i], "--play")) autoplay = 1;
         else rom_arg = argv[i];
     }
 
@@ -805,6 +783,7 @@ int main(int argc, char **argv) {
     snprintf(ini_path, sizeof ini_path, "%sstartropics.ini", base_dir);
     load_config();
     if (!file_exists(ini_path)) write_config();
+    if (stats_path) stats_file = nes_fopen(stats_path, "w");
 
     apu_set_sample_rate(SAMPLE_RATE);
     nes_palette_build(palette);
@@ -814,18 +793,27 @@ int main(int argc, char **argv) {
     int win_h = src0.h * cfg.window_size, win_w = (int)(win_h * target_aspect(src0.h) + 0.5);
     window = SDL_CreateWindow("StarTropics (native port)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               win_w, win_h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
-                              (cfg.display_mode ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+                              (cfg.display_mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!window) { fatal_box(SDL_GetError()); SDL_Quit(); return 1; }
+#ifdef _WIN32
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "direct3d11");   /* lets gpu_sync limit the presentation queue */
+#endif
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, 0);
     if (!renderer) { fatal_box(SDL_GetError()); SDL_Quit(); return 1; }
+    {
+        SDL_RendererInfo ri;
+        if (SDL_GetRendererInfo(renderer, &ri) == 0) printf("renderer: %s%s\n", ri.name, gpu_sync_init(renderer) ? " (frame latency 1)" : "");
+    }
+    if (cfg.display_mode == 2) apply_graphics();
     font_init(renderer);
     load_backdrop();
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+    input_init();
     build_menu();
     update_title();
 
-    /* ---- ROM: command line, else the remembered path, else rom/ next to the exe ---- */
+    /* ---- ROM: command line, else the remembered path ---- */
     {
         char path[2048] = "";
         if (rom_arg) snprintf(path, sizeof path, "%s", rom_arg);
@@ -840,7 +828,7 @@ int main(int argc, char **argv) {
     /* ---- self tests ---- */
     if (uishot_png) {
         menu.tab = uishot_tab < 5 ? uishot_tab : 0; ui_select_first(&menu);
-        for (int i = 0; i < uishot_frames && rom_ok; i++) { nes_run_frame(); audio_pump(1); }
+        for (int i = 0; i < uishot_frames && rom_ok; i++) { nes_run_frame(); audio_out_pump(1, cfg.volume); }
         draw_menu();
         SDL_RenderPresent(renderer);
         draw_menu();
@@ -851,32 +839,93 @@ int main(int argc, char **argv) {
     }
     if (selftest_frames > 0) {
         if (!rom_ok) { fprintf(stderr, "selftest: no valid ROM (%s)\n", rom_status); SDL_Quit(); return 1; }
-        for (int i = 0; i < selftest_frames; i++) { nes_run_frame(); audio_pump(1); }
+        uint8_t wram0[8192];
+        memcpy(wram0, cart.wram, sizeof wram0);
+        for (int i = 0; i < selftest_frames; i++) { nes_run_frame(); audio_out_pump(1, cfg.volume); }
+        uint64_t h1 = 0xcbf29ce484222325ULL;
+        for (size_t i = 0; i < sizeof ppu.fb; i++) { h1 ^= ppu.fb[i]; h1 *= 0x100000001b3ULL; }
+        /* run-ahead determinism: the same frames with a save / two-frame lookahead / restore cycle after each */
+        memcpy(cart.wram, wram0, sizeof wram0);
+        nes_power();
+        size_t sz = nes_state_size();
+        void *st = malloc(sz);
+        for (int i = 0; i < selftest_frames; i++) {
+            nes_run_frame(); audio_out_pump(1, cfg.volume);
+            nes_state_save(st, sz);
+            nes_run_frame(); nes_run_frame();
+            nes_state_load(st, sz);
+        }
+        free(st);
+        uint64_t h2 = 0xcbf29ce484222325ULL;
+        for (size_t i = 0; i < sizeof ppu.fb; i++) { h2 ^= ppu.fb[i]; h2 *= 0x100000001b3ULL; }
+        int same = (h1 == h2);
         draw_game();
         SDL_RenderPresent(renderer);
         int rc = write_frame_png(selftest_png);
-        printf("selftest: %d frames, %s -> %s\n", selftest_frames, rc == 0 ? "wrote" : "FAILED to write", selftest_png);
+        printf("selftest: %d frames, %s -> %s; run-ahead determinism %s\n", selftest_frames,
+               rc == 0 ? "wrote" : "FAILED to write", selftest_png, same ? "OK" : "MISMATCH");
         font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
-        return rc == 0 ? 0 : 1;
+        return (rc == 0 && same) ? 0 : 1;
     }
 
     /* ---- audio ---- */
     if (SDL_WasInit(SDL_INIT_AUDIO)) {
-        SDL_AudioSpec want, have;
-        SDL_zero(want);
-        want.freq = SAMPLE_RATE; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 1024;
-        audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-        if (!audio_dev) fprintf(stderr, "could not open audio: %s\n", SDL_GetError());
-        else SDL_PauseAudioDevice(audio_dev, 0);
+        audio_ok = audio_out_init(SAMPLE_RATE, cfg.audio_latency);
+        if (!audio_ok) fprintf(stderr, "could not open audio: %s\n", SDL_GetError());
     }
-    open_controller();
+    if (autoplay && rom_ok) start_game();   /* --play: skip the launcher */
 
-    /* ---- main loop ---- */
+    /* ---- main loop ----
+       Each iteration: (1) wait for the display's vertical blank (phase), then sleep until just
+       before the next one minus the time the work takes (frame delay), so the controller is read
+       as late as possible; (2) poll events, read input, emulate the frame (plus run-ahead frames
+       whose picture is shown instead), draw; (3) present without vsync, so the frame is picked up
+       at that vblank. A timer floor keeps the game at 60.1 fps if vblank waiting is unavailable. */
+    gpu_sync_timer_begin();
+    setup_sync();
     const Uint64 perf_freq = SDL_GetPerformanceFrequency();
-    const double period = (double)perf_freq / NES_FPS;
-    double next = (double)SDL_GetPerformanceCounter();
-    int frames = 0, paused = 0;
+    const double tick_ms = 1000.0 / (double)perf_freq;
+    const double period = (double)perf_freq / NES_FPS;                       /* timer-mode frame period */
+    double vblank = (double)perf_freq / (refresh_hz > 0 ? refresh_hz : 60.0); /* refined from measured intervals */
+    double work_est = 2.0 / tick_ms;                                          /* emulate+draw time estimate */
+    double margin = 2.0 / tick_ms;                                            /* safety before the deadline */
+    double next = (double)SDL_GetPerformanceCounter() + period;
+    double deadline = next;
+    Uint64 last_present = SDL_GetPerformanceCounter();
+    double grid = (double)last_present + vblank * vsync_div;   /* predicted vblank the next frame is shown at */
+    double last_anchor = 0;
+    int anchor_countdown = 0;
+    size_t ra_size = nes_state_size();
+    void *ra_state = malloc(ra_size);
+    Uint64 stats_t0 = last_present;
+    double stats_lat = 0, stats_work = 0;
+    int frames = 0, paused = 0, stats_frames = 0, missed = 0;
+    const char *pace_names[] = { "timer", "vblank phase-lock", "vsynced present" };
+    if (stats_file) fprintf(stats_file, "pacing: %s, display %.0f Hz, %d vblank(s) per frame, run-ahead %d\n",
+                            pace_names[pace_mode], refresh_hz, vsync_div, cfg.runahead);
     while (running) {
+        int in_game = (state == ST_GAME && !paused);
+        const Uint8 *ks0 = SDL_GetKeyboardState(NULL);
+        int fast = in_game && ks0[SDL_SCANCODE_TAB];
+
+        /* (1) phase + frame delay */
+        if (!fast) {
+            if (pace_mode == 1) {
+                /* aim at the predicted vblank; if we are too late for it, take the following one(s) */
+                double now = (double)SDL_GetPerformanceCounter();
+                while (grid < now + work_est + margin) grid += vblank;
+                deadline = grid;
+            } else if (pace_mode == 2) {
+                deadline = ((double)last_present + vblank * vsync_div > next) ? (double)last_present + vblank * vsync_div : next;
+            } else {
+                deadline = next;
+            }
+            next = deadline + period;
+            sleep_until(deadline - work_est - margin, tick_ms);
+        }
+        Uint64 t0 = SDL_GetPerformanceCounter();
+
+        /* (2) events, input, emulation, draw */
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { running = 0; break; }
@@ -887,17 +936,10 @@ int main(int argc, char **argv) {
                 menu.tab = rom_ok ? 0 : 4; menu.focus = 1; ui_select_first(&menu);
                 continue;
             }
-            if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_JOYDEVICEADDED) {
-                /* prefer a mapped controller over a generic joystick when one appears */
-                if (joystick && ev.type == SDL_CONTROLLERDEVICEADDED) close_controllers();
-                open_controller();
-                continue;
-            }
-            if (ev.type == SDL_CONTROLLERDEVICEREMOVED || ev.type == SDL_JOYDEVICEREMOVED) {
-                SDL_JoystickID mine = -1;
-                if (controller) mine = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
-                else if (joystick) mine = SDL_JoystickInstanceID(joystick);
-                if (ev.cdevice.which == mine) { close_controllers(); open_controller(); }
+            if (ev.type == SDL_CONTROLLERDEVICEADDED || ev.type == SDL_JOYDEVICEADDED ||
+                ev.type == SDL_CONTROLLERDEVICEREMOVED || ev.type == SDL_JOYDEVICEREMOVED) {
+                input_handle_event(&ev);
+                refresh_controls_info();
                 continue;
             }
             if (state == ST_MENU) {
@@ -916,7 +958,7 @@ int main(int argc, char **argv) {
                 case SDLK_F5: state_save(); break;
                 case SDLK_F8: state_load(); break;
                 case SDLK_F12: save_screenshot(); break;
-                case SDLK_p: paused = !paused; if (audio_dev) SDL_ClearQueuedAudio(audio_dev); break;
+                case SDLK_p: paused = !paused; audio_out_clear(); break;
                 case SDLK_r: if (ev.key.keysym.mod & KMOD_CTRL) { nes_reset(); printf("reset\n"); } break;
                 default: break;
                 }
@@ -926,46 +968,96 @@ int main(int argc, char **argv) {
             }
         }
         if (!running) break;
+        in_game = (state == ST_GAME && !paused);
 
-        const Uint8 *ks = SDL_GetKeyboardState(NULL);
-        int fast = 0;
         if (state == ST_MENU) {
             /* launcher: let the game's own intro / title / demo play with sound until a game starts */
-            if (rom_ok && !game_started) { nes_set_pad(0, 0); nes_run_frame(); audio_pump(0); }
+            if (rom_ok && !game_started) { nes_set_pad(0, 0); nes_run_frame(); audio_out_pump(0, cfg.volume); }
             draw_menu();
-            SDL_RenderPresent(renderer);
         } else if (paused) {
-            render_game();
-            SDL_Delay(16);
-            next = (double)SDL_GetPerformanceCounter();
-            continue;
+            draw_game();
         } else {
-            fast = ks[SDL_SCANCODE_TAB] != 0;
             int steps = fast ? FAST_FORWARD_FRAMES : 1;
+            uint8_t pad = 0;
             for (int s = 0; s < steps; s++) {
-                nes_set_pad(0, read_pad());
+                pad = input_read(cfg.key, cfg.pad);
+                nes_set_pad(0, pad);
                 nes_run_frame();
-                audio_pump(fast);
+                audio_out_pump(fast, cfg.volume);
                 if (++frames % 60 == 0) battery_check(0);
             }
-            render_game();
+            if (cfg.runahead > 0 && !fast) {
+                /* run-ahead: show the frame the game will reach `runahead` frames from now with this
+                   input held, then return to the real timeline. Audio comes from the real frame only. */
+                nes_state_save(ra_state, ra_size);
+                for (int i = 0; i < cfg.runahead; i++) nes_run_frame();
+                draw_game();
+                nes_state_load(ra_state, ra_size);
+            } else {
+                draw_game();
+            }
         }
-        if (fast) { next = (double)SDL_GetPerformanceCounter(); continue; }
-        /* pace to the NES frame rate; resync if we fall far behind */
-        next += period;
-        Uint64 now = SDL_GetPerformanceCounter();
-        if ((double)now > next + 4 * period) next = (double)now;
-        while ((double)now < next) {
-            double remaining_ms = (next - (double)now) * 1000.0 / (double)perf_freq;
-            if (remaining_ms > 2.5) SDL_Delay((Uint32)(remaining_ms - 1.5));
-            now = SDL_GetPerformanceCounter();
+        Uint64 t1 = SDL_GetPerformanceCounter();
+
+        /* (3) present */
+        SDL_RenderPresent(renderer);
+        Uint64 t2 = SDL_GetPerformanceCounter();
+
+        /* adapt the frame delay to the measured work time; widen the margin after a missed deadline */
+        double work = (double)(t1 - t0);
+        work_est = (work > work_est) ? work : work_est * 0.995 + work * 0.005;
+        if (!fast) {
+            if ((double)t1 > deadline) { missed++; margin += 0.5 / tick_ms; if (margin > 6.0 / tick_ms) margin = 6.0 / tick_ms; }
+            else if (margin > 2.0 / tick_ms) margin -= 0.01 / tick_ms;
+            if ((double)t2 > next + 4 * period) next = (double)t2 + period;   /* fell far behind: resync */
+            if (pace_mode == 1) {
+                /* re-anchor the vblank grid: Present returning late means it waited for the vblank
+                   (one-frame queue), otherwise ask the display directly every couple of seconds */
+                double anchor = 0;
+                if ((double)(t2 - t1) * tick_ms > 0.8 && fabs((double)t2 - deadline) < vblank) anchor = (double)t2;
+                else if (--anchor_countdown <= 0) {
+                    anchor_countdown = 120;
+                    if (gpu_sync_wait_vblank()) anchor = (double)SDL_GetPerformanceCounter();
+                }
+                if (anchor > 0) {
+                    if (last_anchor > 0) {
+                        double iv = anchor - last_anchor;
+                        int k = (int)(iv / vblank + 0.5);
+                        if (k >= 1 && k <= 64 && fabs(iv / k - vblank) < vblank * 0.1) vblank = vblank * 0.95 + (iv / k) * 0.05;
+                    }
+                    last_anchor = anchor;
+                    grid = anchor + vblank * vsync_div;
+                } else {
+                    grid = deadline + vblank * vsync_div;
+                }
+            }
+        } else {
+            next = (double)t2 + period;
+            grid = (double)t2 + vblank * vsync_div;
+        }
+        last_present = t2;
+        if (stats_file && in_game && !fast) {
+            stats_lat += (double)(t2 - t0) * tick_ms;
+            stats_work += work * tick_ms;
+            if (++stats_frames >= 60) {
+                double ms = (double)(t2 - stats_t0) * tick_ms / stats_frames;
+                fprintf(stats_file, "%s: frame %.3f ms (%.2f fps)  input->present %.2f ms  work %.2f ms  margin %.1f ms  "
+                        "vblank %.3f ms  audio queued %d ms  apu rate %d  missed deadlines %d\n",
+                        pace_names[pace_mode], ms, 1000.0 / ms, stats_lat / stats_frames, stats_work / stats_frames,
+                        margin * tick_ms, vblank * tick_ms, audio_out_queued_ms(), audio_out_rate(), missed);
+                fflush(stats_file);
+                stats_t0 = t2; stats_frames = 0; stats_lat = stats_work = 0;
+            }
         }
     }
 
+    free(ra_state);
+    gpu_sync_timer_end();
     battery_check(1);
     write_config();
-    close_controllers();
-    if (audio_dev) SDL_CloseAudioDevice(audio_dev);
+    input_shutdown();
+    audio_out_shutdown();
+    if (stats_file) fclose(stats_file);
     font_quit();
     if (sharp_tex) SDL_DestroyTexture(sharp_tex);
     if (game_tex) SDL_DestroyTexture(game_tex);

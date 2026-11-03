@@ -15,18 +15,23 @@ Getting started
 Menu (Esc in game)
 ------------------
 Play      Start / resume, reset, save state, load state, quit
-Graphics  Display mode (windowed / fullscreen), window size 1x-6x,
-          scaling (integer / fit window / stretch),
+Graphics  Display mode (windowed / fullscreen / fullscreen exclusive),
+          window size 1x-6x, scaling (integer / fit window / stretch),
           aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 stretched),
-          filter (nearest / linear / sharp), overscan crop
-Audio     Volume
+          filter (nearest / linear / sharp), overscan crop,
+          low-latency sync (phase-locks to the display), run-ahead (0-3 frames;
+          2 cancels the game's own input lag)
+Audio     Volume, latency preset (Low / Normal / Safe)
 Controls  Rebind the eight NES buttons (select a row, press Enter, press the key)
 ROM       Choose or change the cartridge dump
 
 Default keys
 ------------
-D-pad: arrow keys    A: X    B: Z    Start: Enter    Select: Right Shift
-Gamepad: A, B or X, Start, Back, D-pad or left stick (SDL game controller)
+D-pad: arrow keys    A (jump): X    B (attack): Z    Start: Enter    Select: Right Shift
+Gamepad: A = right face button (B on Xbox), B = bottom face button (A on Xbox),
+Start, Back = Select, D-pad or left stick; Guide or LB opens the menu.
+Keys and pad buttons can be rebound on the Controls tab: select a row, press
+Enter, then press the new key or pad button. "Reset to defaults" restores them.
 
 Other keys: Tab (hold) fast-forward, P pause, F5 save state, F8 load state,
 F11 or Alt+Enter fullscreen, F12 screenshot (screenshots folder), Ctrl+R reset.

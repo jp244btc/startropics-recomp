@@ -4,6 +4,7 @@
  */
 #include "ui.h"
 #include "font.h"
+#include "input.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -34,7 +35,8 @@ static int item_value_text(const ui_item *it, int capture, char *buf, size_t n) 
         snprintf(buf, n, "%d%s", it->value ? *it->value : 0, it->suffix ? it->suffix : "");
         return 1;
     case UI_KEY:
-        if (capture) snprintf(buf, n, "press a key...");
+        if (capture) snprintf(buf, n, it->pad ? "press a key or pad button..." : "press a key...");
+        else if (it->pad) snprintf(buf, n, "%s  /  pad %s", SDL_GetKeyName((SDL_Keycode)(it->value ? *it->value : 0)), input_pad_name(*it->pad));
         else snprintf(buf, n, "%s", SDL_GetKeyName((SDL_Keycode)(it->value ? *it->value : 0)));
         return 1;
     default:
@@ -239,6 +241,13 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
     case SDL_KEYDOWN:
         return key_action(m, e->key.keysym.sym);
     case SDL_CONTROLLERBUTTONDOWN:
+        if (m->capture) {   /* binding a pad button to the selected row */
+            ui_tab *t = &m->tabs[m->tab];
+            ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+            m->capture = 0;
+            if (it && it->kind == UI_KEY && it->pad) { *it->pad = e->cbutton.button; return ev(UI_EV_CHANGED, it->id); }
+            return ev(UI_EV_NONE, 0);
+        }
         switch (e->cbutton.button) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP: return key_action(m, SDLK_UP);
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return key_action(m, SDLK_DOWN);

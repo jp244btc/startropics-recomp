@@ -20,6 +20,9 @@ screenshots/
 # External test ROMs (cloned by tests/get_test_roms.sh)
 tests/external/
 
+# Python bytecode
+__pycache__/
+
 # Editor / OS noise
 *.swp
 .DS_Store

@@ -19,6 +19,7 @@ typedef struct ui_item {
     char *text;                   /* TEXT: the edited string (Enter on the row edits it, Enter again keeps it, Esc cancels) */
     int text_cap;                 /* TEXT: size of the buffer */
     int masked;                   /* TEXT: show * instead of the characters (passwords) */
+    const char *placeholder;      /* TEXT: shown dim while it is empty (NULL: "(none)") */
 } ui_item;
 
 enum { UI_CAPTURE_NONE = 0, UI_CAPTURE_KEY = 1, UI_CAPTURE_TEXT = 2 };

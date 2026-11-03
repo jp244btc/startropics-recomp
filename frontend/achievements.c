@@ -224,6 +224,8 @@ static void toast_advance(void) {
 /* ------------------------------------------------------------------ */
 /* Session file: "<user>\n<token>\n"                                   */
 /* ------------------------------------------------------------------ */
+static int g_token_saved;   /* the file holds a token: the menu shows it instead of an empty password */
+
 static int session_load(char *user, size_t user_len, char *token, size_t token_len) {
     char line1[512], line2[512];
     FILE *f;
@@ -238,6 +240,7 @@ static int session_load(char *user, size_t user_len, char *token, size_t token_l
     if (!line1[0] || !line2[0]) return 0;
     snprintf(user, user_len, "%s", line1);
     snprintf(token, token_len, "%s", line2);
+    g_token_saved = 1;
     return 1;
 }
 
@@ -248,9 +251,11 @@ static void session_save(const char *user, const char *token) {
     if (!f) { printf("[ra] could not write the session file\n"); return; }
     fprintf(f, "%s\n%s\n", user, token);
     fclose(f);
+    g_token_saved = 1;
 }
 
 static void session_delete(void) {
+    g_token_saved = 0;
     if (!g_session_path[0]) return;
 #ifdef _WIN32
     {
@@ -944,6 +949,8 @@ void ach_login(const char *username, const char *password) {
     }
     begin_login(username, password, 0);
 }
+
+int ach_token_saved(void) { return g_token_saved; }
 
 void ach_logout(void) {
     if (g_client) {

@@ -51,7 +51,7 @@ static int item_value_text(const ui_item *it, int capture, char *buf, size_t n) 
             snprintf(buf, n, "%s", len > keep ? t + (len - keep) : t);
         }
         if (capture) strncat(buf, "_", n - strlen(buf) - 1);
-        else if (!len) snprintf(buf, n, "(none)");
+        else if (!len) snprintf(buf, n, "%s", it->placeholder ? it->placeholder : "(none)");
         return 1; }
     default:
         buf[0] = 0;

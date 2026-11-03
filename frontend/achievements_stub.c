@@ -7,6 +7,7 @@ void ach_shutdown(void) {}
 void ach_login(const char *username, const char *password) { (void)username; (void)password; }
 void ach_logout(void) {}
 int  ach_logged_in(void) { return 0; }
+int  ach_token_saved(void) { return 0; }
 const char *ach_username(void) { return ""; }
 void ach_load_game(const char *rom_path, const char *title) { (void)rom_path; (void)title; }
 void ach_unload_game(void) {}

@@ -22,6 +22,7 @@ void ach_shutdown(void);
 void ach_login(const char *username, const char *password);   /* asynchronous; ach_status() reports the outcome */
 void ach_logout(void);                          /* ends the session and forgets the saved token */
 int  ach_logged_in(void);
+int  ach_token_saved(void);                     /* 1 while a session token is kept for the next start */
 const char *ach_username(void);                 /* "" when not logged in */
 
 /* Identify the cartridge dump the RetroAchievements way (the file hashed with its iNES

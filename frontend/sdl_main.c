@@ -1508,6 +1508,7 @@ static void build_res_list(int display) {
 static void refresh_ra_items(void) {
     if (!ach_available()) return;
     ra_items[3].label = ach_logged_in() ? "Log out" : "Log in";
+    ra_items[2].placeholder = ach_token_saved() ? "(token saved)" : NULL;   /* the password is never kept */
     if (!ra_user_buf[0] && ach_username()[0]) snprintf(ra_user_buf, sizeof ra_user_buf, "%s", ach_username());
     int u, t, p;
     if (ach_game_progress(&u, &t, &p))

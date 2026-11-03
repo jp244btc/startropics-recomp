@@ -7,8 +7,24 @@
 #include "nes.h"
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 cart_t cart;
+
+/* fopen that accepts UTF-8 paths on Windows (the C runtime's fopen is ANSI there) */
+FILE *nes_fopen(const char *path, const char *mode) {
+#ifdef _WIN32
+    wchar_t wpath[4096], wmode[16];
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 4096)) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16)) return NULL;
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
 
 /* ---- SHA-1 (small, self-contained) ---- */
 static uint32_t rol32(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
@@ -72,7 +88,7 @@ const char *cart_known_name(void) {
 }
 
 int cart_load(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = nes_fopen(path, "rb");
     if (!f) { fprintf(stderr, "cart: cannot open %s\n", path); return -1; }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
@@ -141,9 +157,10 @@ void cart_free(void) {
 }
 
 static size_t battery_size(void) { return cart.mmc6 ? 1024 : 8192; }
+size_t cart_battery_size(void) { return battery_size(); }
 
 int cart_load_battery(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = nes_fopen(path, "rb");
     if (!f) return -1;
     size_t n = fread(cart.wram, 1, battery_size(), f);
     fclose(f);
@@ -152,7 +169,7 @@ int cart_load_battery(const char *path) {
 
 int cart_save_battery(const char *path) {
     if (!cart.battery) return 0;
-    FILE *f = fopen(path, "wb");
+    FILE *f = nes_fopen(path, "wb");
     if (!f) return -1;
     fwrite(cart.wram, 1, battery_size(), f);
     fclose(f);

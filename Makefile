@@ -13,9 +13,13 @@ endif
 PYTHON  ?= python
 CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
 LDFLAGS ?=
-ifeq ($(OS),Windows_NT)
+# Windows detection: $(OS) is set by cmd/PowerShell, uname by MSYS2/MinGW shells
+UNAME := $(shell uname -s 2>/dev/null)
+ifneq (,$(findstring Windows_NT,$(OS))$(findstring MINGW,$(UNAME))$(findstring MSYS,$(UNAME)))
+  WINDOWS := 1
   EXE := .exe
 else
+  WINDOWS := 0
   EXE :=
 endif
 
@@ -32,9 +36,19 @@ GEN_SRC := $(wildcard $(GEN)/*.c)
 GEN_OBJ := $(patsubst $(GEN)/%.c,$(BUILD)/gen/%.o,$(GEN_SRC))
 
 SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
-SDL_LIBS   := $(shell sdl2-config --libs 2>/dev/null)
+ifeq ($(WINDOWS),1)
+  # single-file executable: SDL2 linked statically, no DLLs to ship
+  SDL_LIBS := $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -static-libgcc
+  PLATFORM := win64
+else
+  SDL_LIBS := $(shell sdl2-config --libs 2>/dev/null)
+  PLATFORM := $(shell uname -s | tr A-Z a-z)-$(shell uname -m)
+endif
 
-.PHONY: all headless recomp startropics test clean
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c
+FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC))
+
+.PHONY: all headless recomp startropics test cosim dist clean
 
 all: headless
 
@@ -69,13 +83,21 @@ recomp:
 # ---- native game ----
 startropics: $(BUILD)/startropics$(EXE)
 
-$(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(BUILD)/sdl_main.o $(GEN_OBJ)
+$(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
 	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(LDFLAGS)
 
-$(BUILD)/sdl_main.o: frontend/sdl_main.c runtime/nes.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h frontend/font.h frontend/ui.h frontend/filedialog.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) -Iruntime -c $< -o $@
+
+# ---- distributable package: the executable plus the player notes ----
+dist: $(BUILD)/startropics$(EXE)
+	rm -rf dist/startropics && mkdir -p dist/startropics
+	cp $(BUILD)/startropics$(EXE) dist/startropics/
+	cp docs/PLAYERS.md dist/startropics/README.txt
+	$(PYTHON) -c "import shutil; shutil.make_archive('dist/startropics-$(PLATFORM)', 'zip', 'dist', 'startropics')"
+	@echo "package: dist/startropics-$(PLATFORM).zip"
 
 # ---- tests ----
 test: headless

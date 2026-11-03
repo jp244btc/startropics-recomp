@@ -1,0 +1,82 @@
+/*
+ * filedialog.c - Windows: GetOpenFileNameW (comdlg32); macOS: osascript;
+ * Linux/BSD: zenity or kdialog if installed.
+ */
+#include "filedialog.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <commdlg.h>
+#include <SDL_syswm.h>
+
+int file_dialog_available(void) { return 1; }
+
+int file_dialog_open(SDL_Window *parent, char *out, size_t out_len) {
+    HWND owner = NULL;
+    if (parent) {
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+        if (SDL_GetWindowWMInfo(parent, &info)) owner = info.info.win.window;
+    }
+    wchar_t buf[2048] = L"";
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"NES cartridge dump (*.nes)\0*.nes\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = (DWORD)(sizeof buf / sizeof buf[0]);
+    ofn.lpstrTitle = L"Select your own StarTropics (USA) cartridge dump";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
+    if (!GetOpenFileNameW(&ofn)) return 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, (int)out_len, NULL, NULL) == 0) return 0;
+    return 1;
+}
+
+#else
+#include <unistd.h>
+
+static int run_capture(const char *cmd, char *out, size_t out_len) {
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+    out[0] = 0;
+    if (!fgets(out, (int)out_len, p)) { pclose(p); return 0; }
+    int rc = pclose(p);
+    size_t n = strlen(out);
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
+    return rc == 0 && n > 0;
+}
+
+static int have_cmd(const char *name) {
+    char cmd[256];
+    snprintf(cmd, sizeof cmd, "command -v %s >/dev/null 2>&1", name);
+    return system(cmd) == 0;
+}
+
+int file_dialog_available(void) {
+#ifdef __APPLE__
+    return 1;
+#else
+    return have_cmd("zenity") || have_cmd("kdialog");
+#endif
+}
+
+int file_dialog_open(SDL_Window *parent, char *out, size_t out_len) {
+    (void)parent;
+#ifdef __APPLE__
+    return run_capture("osascript -e 'POSIX path of (choose file with prompt \"Select your StarTropics (USA) cartridge dump\")' 2>/dev/null",
+                       out, out_len);
+#else
+    if (have_cmd("zenity"))
+        return run_capture("zenity --file-selection --title='Select your StarTropics (USA) cartridge dump' "
+                           "--file-filter='NES cartridge dump (*.nes) | *.nes' --file-filter='All files | *' 2>/dev/null", out, out_len);
+    if (have_cmd("kdialog"))
+        return run_capture("kdialog --getopenfilename . 'NES cartridge dump (*.nes)' 2>/dev/null", out, out_len);
+    return 0;
+#endif
+}
+#endif

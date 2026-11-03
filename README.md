@@ -19,6 +19,40 @@ runtime/ (PPU, APU, MMC6, CPU fallback) + frontend/ (SDL2) ───────
 your .nes again, at run time, for CHR graphics, level data, text, music
 ```
 
+## For players: the launcher
+
+`make dist` packages a single executable (SDL2 linked statically, no DLLs) with a
+launcher in the style of the N64 recompilation projects: a tabbed menu
+(**Play / Graphics / Audio / Controls / ROM**) over a hero backdrop. On the ROM tab
+"Choose ROM file..." opens the system file dialog; dropping a `.nes` file onto the
+window or passing it on the command line also works. The file's hash is checked
+and anything that is not a StarTropics dump is refused. Once a valid dump is
+loaded the launcher runs the game's own intro, title screen and demo in the
+background with sound, so the intro and title music play straight from the ROM
+and the dimmed, upscaled title screen becomes the backdrop. Put a
+`launcher-background.bmp` next to the executable to use a picture of your own
+instead (no artwork is bundled: Nintendo's promotional art cannot be shipped).
+
+Options (all saved to `startropics.ini`): windowed / fullscreen, window size
+1x-6x, scaling (integer / fit window / stretch), aspect ratio (square pixels 8:7,
+4:3 CRT, 16:9 stretched), filter (nearest / linear / sharp), overscan crop,
+volume, and rebinding of the eight NES buttons. Esc in game opens the same menu
+as a pause screen. XInput and other gamepads are handled through SDL's game
+controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
+the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
+a generic joystick layout, and `startropics --list-controllers out.txt` writes
+what SDL detected.
+
+Note on distribution: a prebuilt executable necessarily embeds the recompiled
+game logic (as the N64 recompilation releases do), while every asset still comes
+from the player's own ROM at run time. Building from source as described below
+keeps everything derived from the ROM on your own machine.
+
+A real 16:9 view that shows more of the world is **not** included: a tile-based
+NES game has no picture beyond the 256-pixel edge, so widescreen needs the map
+format of each scene type decoded from the ROM and re-rendered (see "Where to
+take it next" in `docs/ARCHITECTURE.md`).
+
 ## What works
 
 Verified in this session (headless, scripted input, screenshots inspected):
@@ -74,7 +108,8 @@ build/startropics      # looks for rom/*.nes next to the executable; or pass a p
 `make recomp` prints how many instructions and routines it found (about 24,200
 instructions in 430 routines for the USA dump from static analysis alone, a few
 hundred more with coverage data). Run `make recomp` again after collecting more
-coverage (below) and rebuild.
+coverage (below) and rebuild. `make dist` zips the executable with the player
+notes (`docs/PLAYERS.md`) into `dist/`.
 
 ### Controls
 
@@ -86,10 +121,10 @@ coverage (below) and rebuild.
 | Start | Enter | Start |
 | Select | Right Shift | Back |
 
-Hotkeys: **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop, **Tab** (hold)
-fast-forward, **P** pause, **F5** / **F8** save / load state, **F12** screenshot
-(`screenshots/`), **Ctrl+R** reset, **Esc** quit. Keys and the window scale can be
-changed in `startropics.ini`, written next to the executable on first run.
+Hotkeys: **Esc** menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
+**Tab** (hold) fast-forward, **P** pause, **F5** / **F8** save / load state, **F12**
+screenshot (`screenshots/`), **Ctrl+R** reset. Keys and display settings are in
+the menu and in `startropics.ini` next to the executable.
 
 Battery saves go to `saves/<rom name>.sav` (the raw 1 KiB MMC6 RAM, written when
 it changes and on exit).

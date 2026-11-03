@@ -252,6 +252,9 @@ void cart_free(void);
 int  cart_load_battery(const char *path);
 int  cart_save_battery(const char *path);
 const char *cart_known_name(void);   /* "StarTropics (USA)" etc. for known dumps, else NULL */
+size_t cart_battery_size(void);       /* bytes of battery RAM for the loaded cartridge */
+#include <stdio.h>
+FILE *nes_fopen(const char *path, const char *mode);  /* UTF-8 path aware fopen */
 
 /* mapper.c */
 void    mapper_init(void);

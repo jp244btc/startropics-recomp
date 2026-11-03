@@ -6,9 +6,10 @@ rom/*
 generated/*
 !generated/.gitignore
 
-# Build output and saves
+# Build output, packages (they contain the recompiled game) and saves
 build/
 build-*/
+dist/
 saves/
 screenshots/
 *.sav

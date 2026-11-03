@@ -189,11 +189,14 @@ loader, bank 29 `$A665` event scripts) and are not part of the map data.
 
 ## 9. What the widescreen renderer does with this
 
-`widescreen_render()` keeps the PPU's 256 x 240 frame in the centre and fills
-96 pixels on each side (448 x 240 in all; the frontend's "16:9 (widescreen)"
-aspect choice shows the 341 pixels that make a 16:9 picture at the 4:3 CRT pixel
-shape, so the normal picture sits between black bars wherever the bands are
-blank) by decoding the map around the camera:
+`widescreen_render()` keeps the PPU's 256 x 240 frame in the centre of a
+704 x 336 canvas (224 pixels on each side, 48 lines above and below) and
+renders the part of it the frontend shows, decoding the map around the
+camera. The "16:9 (widescreen)" aspect choice shows the 341 columns that make
+a 16:9 picture at the 4:3 CRT pixel shape; Integer scaling in fullscreen shows
+every line and column the screen holds at the multiple (342 x 268 on the
+Steam Deck at 3x). Wherever the scene is not decoded, the normal picture sits
+between black bars:
 
 1. The scene must be the field engine in IRQ mode 0 (`$00` = 0 island or 1
    town, `$28` = 0) with the background enabled on line 0. Hut interiors need
@@ -211,10 +214,11 @@ blank) by decoding the map around the camera:
    pointer, row decode, variant resolution, tiles and palette as above; the
    pixels are drawn from the frame's CHR banks and the current palette, with
    the line's grayscale/emphasis bits. Lines whose background was disabled
-   (224-239 in mode 0) get the backdrop colour, like the centre.
+   (224-239 in mode 0) show the map too, with the bits of the last line the
+   PPU drew; so do the lines above and below the picture.
 
 The bands contain background only. The game does not simulate anything
-beyond the 256-pixel edge: enemies, villagers and items are object slots that
+beyond the edges of the picture: enemies, villagers and items are object slots that
 exist only inside the picture, so there are no sprites to draw there, and a
 tile the game changed in VRAM directly (opened passages, the landing boat)
 appears when it scrolls into the centre, not in the bands. Scenes with an
@@ -223,8 +227,8 @@ Verified with the harness on the island, in Coralcola (0 of 41,216 tiles
 differ while walking around the village) and inside a hut (0 differ once
 the game's redraw has finished).
 
-Harness: `nes-headless --widescreen out.png` writes the wide frame (also
+Harness: `nes-headless --widescreen out.png` writes the whole canvas (also
 every N frames with `--png-every`), checks that its centre is identical to
-the normal frame and compares the decoder's tiles under the centre 256 x 224
+the normal frame on every line the PPU drew and compares the decoder's tiles under the centre 256 x 224
 with the PPU's nametables; `--ram-dump-every N` and the bank columns in
 `--trace` lines were added for this work.

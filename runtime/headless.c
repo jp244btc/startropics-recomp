@@ -87,13 +87,13 @@ static void fb_to_rgb(uint8_t *rgb) {
     }
 }
 
-static uint8_t wide_fb[WS_W * WS_H];
+static uint8_t wide_fb[WS_W * WS_H], wide_emph[WS_H];
 
-/* the widescreen frame (centre = the PPU frame, bands = decoded map or black) as RGB */
+/* the whole widescreen canvas (centre = the PPU frame, around it the decoded map or black) as RGB */
 static int wide_to_rgb(uint8_t *rgb) {
-    int decoded = widescreen_render(wide_fb);
+    int decoded = widescreen_render(wide_fb, wide_emph, 0, 0, WS_W, WS_H);
     for (int y = 0; y < WS_H; y++) {
-        int emph = (ppu.line_emph[y] >> 5) & 7;
+        int emph = (wide_emph[y] >> 5) & 7;
         for (int x = 0; x < WS_W; x++) {
             uint32_t c = pal[emph * 64 + (wide_fb[y * WS_W + x] & 0x3F)];
             rgb[(y * WS_W + x) * 3] = (uint8_t)(c >> 16);
@@ -146,7 +146,7 @@ static void usage(void) {
         "  --input FILE        input script: lines of 'frame BTN+BTN'\n"
         "  --png FILE          write the last frame as PNG\n"
         "  --png-every N       write FILE with the frame number appended every N frames\n"
-        "  --widescreen FILE   write the last frame as a 448x240 PNG with the map decoded in the side bands\n"
+        "  --widescreen FILE   write the last frame as a 704x336 PNG with the map decoded around the picture\n"
         "                      (also every N frames with --png-every); checks that the centre matches --png\n"
         "  --wav FILE          write audio to a 48 kHz WAV\n"
         "  --trace FILE        write a per-instruction trace (interpreter)\n"
@@ -305,12 +305,14 @@ int main(int argc, char **argv) {
 
     if (png) { fb_to_rgb(rgb); png_write_rgb(png, 256, 240, rgb); }
     if (wide) {
-        /* the centre of the wide frame must be the normal frame, pixel for pixel */
+        /* the centre of the canvas must be the normal frame, pixel for pixel, on every line the PPU drew
+           (lines it left blank show the map when the scene is decoded) */
         int decoded = wide_to_rgb(rgb_wide);
         wide_decoded += decoded; wide_frames++;
         fb_to_rgb(rgb);
         for (int y = 0; y < 240; y++)
-            if (memcmp(rgb + y * 256 * 3, rgb_wide + (y * WS_W + WS_BAND) * 3, 256 * 3) != 0) wide_mismatch++;
+            if ((!decoded || (ppu.line_emph[y] & 0x08)) &&
+                memcmp(rgb + y * 256 * 3, rgb_wide + ((y + WS_VBAND) * WS_W + WS_BAND) * 3, 256 * 3) != 0) wide_mismatch++;
         png_write_rgb(wide, WS_W, WS_H, rgb_wide);
         int tiles, bp, tp, bad = widescreen_check(&tiles, &bp, &tp);
         if (bad >= 0) { wide_tiles += tiles; wide_bad_tiles += bad; wide_pixels += tp; wide_bad_pixels += bp; }

@@ -137,16 +137,17 @@ static char sav_path[2048], state_dir[1200];
 static char rom_status[240];
 static char ra_user_buf[64], ra_pass_buf[128];   /* the Achievements tab's text rows; the password is wiped after each login attempt */
 static uint32_t palette[512];
-static uint32_t frame_rgb[WS_W * FB_H];   /* frame_w pixels wide */
-static uint8_t wide_fb[WS_W * WS_H];      /* the frame with the decoded side bands */
-static int frame_w = FB_W;                /* width of the frame in frame_rgb: 256, or WS_W in widescreen mode */
+static uint32_t frame_rgb[WS_W * WS_H];   /* the picture to show, frame_w x frame_h (see frame_to_rgb) */
+static uint8_t wide_fb[WS_W * WS_H];      /* widescreen: that part of the canvas around the PPU's picture */
+static uint8_t wide_emph[WS_H];           /* and the $2001 bits of each of its rows */
+static int frame_w = FB_W, frame_h = FB_H;
 static uint8_t wram_snapshot[8192];
 static SDL_Window *window;
 static SDL_Renderer *renderer;
-static SDL_Texture *game_tex;         /* frame_w x 240 game frame */
-static int tex_w;                     /* width game_tex was created with */
+static SDL_Texture *game_tex;         /* the picture, frame_w x frame_h */
+static int tex_w, tex_h;              /* the size game_tex was created with */
 static SDL_Texture *sharp_tex;        /* integer-prescaled target for the sharp filter */
-static int sharp_k, sharp_w;
+static int sharp_k, sharp_w, sharp_h;
 static int tex_filter = -1;
 /* post-effect passes (shaders): see draw_game_ex */
 static SDL_Texture *scene_tex;        /* the composed picture at output size, before curvature or the final scaling */
@@ -481,39 +482,65 @@ static double pixel_aspect(void) { return cfg.aspect == 0 ? 1.0 : 1.25; }
 /* the output the picture is composed for, set by its users before source_rect */
 static int pic_out_w, pic_out_h;
 
-/* the shape the picture is drawn in: the chosen aspect, except that Integer scaling with a
-   widescreen aspect on a fixed screen (fullscreen, a handheld) widens it to the screen's width at
-   the largest whole multiple. The map decoder supplies the columns, so only bars above and below
-   are left (3x on the Steam Deck: 1280x720 instead of 1152x720). */
-static double picture_aspect(int src_h) {
-    double a = target_aspect(src_h);
-    if (cfg.scaling == 0 && widescreen_on() && cfg.display_mode != 0 && pic_out_w > 0 && pic_out_h >= src_h) {
-        double screen = (double)pic_out_w / (src_h * (pic_out_h / src_h));
-        double widest = WS_W * pixel_aspect() / src_h;
-        if (screen > widest) screen = widest;
-        if (screen > a) a = screen;
-    }
-    return a;
+/* Integer scaling with a widescreen aspect on a fixed screen (fullscreen, a handheld) fills the
+   whole screen: the picture at the largest whole multiple that fits it, and the map decoded beyond
+   its edges on every side wherever the scene's map is known (other scenes keep the normal picture
+   between black bars). Returns the multiple, 0 when the picture is not filled. */
+static int integer_fill(void) {
+    if (cfg.scaling != 0 || !widescreen_on() || cfg.display_mode == 0 || pic_out_w <= 0) return 0;
+    int k = pic_out_h / (cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H);
+    while (k > 1 && FB_W * k * pixel_aspect() > pic_out_w + 0.5) k--;
+    return k < 1 ? 1 : k;
 }
 
+/* the lines and columns added on each side of the normal picture to cover the output at k */
+static void fill_extent(int k, int *ext_y, int *ext_x) {
+    int base = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H, ov = cfg.overscan ? OVERSCAN : 0;
+    int bars = pic_out_h - base * k, bar = bars - bars / 2;   /* the larger of the two bars */
+    *ext_y = bar > 0 ? (bar + k - 1) / k : 0;
+    if (*ext_y > WS_VBAND + ov) *ext_y = WS_VBAND + ov;
+    double px = k * pixel_aspect(), bar_x = (pic_out_w - FB_W * px) / 2;
+    *ext_x = bar_x > 0 ? (int)ceil(bar_x / px - 1e-6) : 0;
+    if (*ext_x > WS_BAND) *ext_x = WS_BAND;
+}
+
+/* The part of the frame shown: of the PPU's picture, or in widescreen mode of the canvas around it
+   (widescreen.h): the part that makes a 16:9 or 16:10 picture at the pixel aspect, or with Integer
+   filling the screen every line and column the output holds at the multiple. */
 static void source_rect(SDL_Rect *src) {
+    int k = integer_fill();
     src->y = cfg.overscan ? OVERSCAN : 0;
     src->h = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
-    if (widescreen_on()) {
-        /* the part of the decoded frame that makes a 16:9 or 16:10 picture at this pixel aspect */
-        src->w = widescreen_visible_width(src->h, pixel_aspect(), picture_aspect(src->h));
+    if (k) {
+        int ey, ex;
+        fill_extent(k, &ey, &ex);
+        src->x = WS_BAND - ex; src->w = FB_W + 2 * ex;
+        src->y += WS_VBAND - ey; src->h += 2 * ey;
+    } else if (widescreen_on()) {
+        src->w = widescreen_visible_width(src->h, pixel_aspect(), target_aspect(src->h));
         src->x = (WS_W - src->w) / 2;
+        src->y += WS_VBAND;
     } else {
         src->x = 0; src->w = FB_W;
     }
 }
 
 static void dest_rect(int ww, int wh, const SDL_Rect *src, SDL_Rect *dst) {
-    double aspect = picture_aspect(src->h);
-    int w, h;
+    double aspect = target_aspect(src->h);
+    int w, h, k = integer_fill();
+    if (k) {
+        /* the normal picture where Integer puts it, the added lines and columns around it; the
+           outermost pixels may lie partly beyond the edges */
+        int ey, ex, base = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
+        fill_extent(k, &ey, &ex);
+        double px = k * pixel_aspect();
+        dst->y = (wh - base * k) / 2 - ey * k; dst->h = src->h * k;
+        dst->x = (int)floor((ww - FB_W * px) / 2 - ex * px + 0.5); dst->w = (int)floor(src->w * px + 0.5);
+        return;
+    }
     if (cfg.scaling == 2) { dst->x = 0; dst->y = 0; dst->w = ww; dst->h = wh; return; }
     if (cfg.scaling == 0) {
-        int k = wh / src->h;
+        k = wh / src->h;
         if (k < 1) k = 1;
         while (k > 1 && (int)(src->h * k * aspect + 0.5) > ww) k--;
         h = src->h * k;
@@ -526,33 +553,45 @@ static void dest_rect(int ww, int wh, const SDL_Rect *src, SDL_Rect *dst) {
 }
 
 static void ensure_textures(int k) {
-    if (tex_filter != cfg.filter || !game_tex || tex_w != frame_w) {
+    if (tex_filter != cfg.filter || !game_tex || tex_w != frame_w || tex_h != frame_h) {
         if (game_tex) SDL_DestroyTexture(game_tex);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, cfg.filter == 1 ? "1" : "0");
-        game_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, frame_w, FB_H);
+        game_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, frame_w, frame_h);
         tex_filter = cfg.filter;
-        tex_w = frame_w;
+        tex_w = frame_w; tex_h = frame_h;
     }
-    if (cfg.filter == 2 && (k != sharp_k || sharp_w != frame_w || !sharp_tex)) {
+    if (cfg.filter == 2 && (k != sharp_k || sharp_w != frame_w || sharp_h != frame_h || !sharp_tex)) {
         if (sharp_tex) SDL_DestroyTexture(sharp_tex);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-        sharp_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, frame_w * k, FB_H * k);
+        sharp_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, frame_w * k, frame_h * k);
         sharp_k = k;
-        sharp_w = frame_w;
+        sharp_w = frame_w; sharp_h = frame_h;
     }
 }
 
-/* the PPU frame (or, in widescreen mode, the frame with the map decoded into the side
-   bands) as ARGB in frame_rgb, frame_w pixels wide */
-static void frame_to_rgb(void) {
-    const uint8_t *fb = ppu.fb;
-    frame_w = FB_W;
-    if (widescreen_on()) { widescreen_render(wide_fb); fb = wide_fb; frame_w = WS_W; }
-    for (int y = 0; y < FB_H; y++) {
-        const uint32_t *pal = palette + ((ppu.line_emph[y] >> 5) & 7) * 64;
-        const uint8_t *src = fb + y * frame_w;
-        uint32_t *dst = frame_rgb + y * frame_w;
-        for (int x = 0; x < frame_w; x++) dst[x] = 0xFF000000u | pal[src[x] & 0x3F];
+/* the part src of the frame (see source_rect: of the PPU's picture, or in widescreen mode of the
+   canvas with the map decoded around it) as ARGB in frame_rgb, frame_w x frame_h */
+static void frame_to_rgb(const SDL_Rect *src) {
+    const uint8_t *fb = ppu.fb + src->y * FB_W + src->x, *emph = ppu.line_emph + src->y;
+    int stride = FB_W;
+    frame_w = src->w; frame_h = src->h;
+    if (widescreen_on()) {
+        int decoded = widescreen_render(wide_fb, wide_emph, src->x, src->y, src->w, src->h);
+        if (!decoded && cfg.overscan && integer_fill())
+            for (int y = 0; y < frame_h; y++) {   /* the lines the crop hides stay black around the picture */
+                int line = src->y + y - WS_VBAND;
+                if ((line >= 0 && line < OVERSCAN) || (line >= FB_H - OVERSCAN && line < FB_H)) {
+                    memset(wide_fb + (size_t)y * frame_w, 0x0F, (size_t)frame_w);
+                    wide_emph[y] = 0;
+                }
+            }
+        fb = wide_fb; emph = wide_emph; stride = frame_w;
+    }
+    for (int y = 0; y < frame_h; y++) {
+        const uint32_t *pal = palette + ((emph[y] >> 5) & 7) * 64;
+        const uint8_t *s = fb + (size_t)y * stride;
+        uint32_t *d = frame_rgb + (size_t)y * frame_w;
+        for (int x = 0; x < frame_w; x++) d[x] = 0xFF000000u | pal[s[x] & 0x3F];
     }
 }
 
@@ -724,10 +763,14 @@ static void draw_game_ex(int backdrop) {
     } else {
         dest_rect(out_w, out_h, &src, &dst);
     }
+    /* the part of the picture on the output (Integer filling the screen lets it overhang the edges):
+       the curvature mesh, the vignette and the mask follow it */
+    SDL_Rect vis, out_rect = { 0, 0, out_w, out_h };
+    if (!SDL_IntersectRect(&dst, &out_rect, &vis)) vis = dst;
     int k = (dst.h + src.h - 1) / src.h;
     if (k < 1) k = 1;
     if (k > 8) k = 8;
-    frame_to_rgb();
+    frame_to_rgb(&src);
     ensure_textures(k);
     SDL_UpdateTexture(game_tex, NULL, frame_rgb, frame_w * (int)sizeof(uint32_t));
     if (use_scene) {
@@ -742,10 +785,9 @@ static void draw_game_ex(int backdrop) {
         SDL_SetRenderTarget(renderer, sharp_tex);
         SDL_RenderCopy(renderer, game_tex, NULL, NULL);
         SDL_SetRenderTarget(renderer, target);
-        SDL_Rect src2 = { src.x * sharp_k, src.y * sharp_k, src.w * sharp_k, src.h * sharp_k };
-        SDL_RenderCopy(renderer, sharp_tex, &src2, &dst);
+        SDL_RenderCopy(renderer, sharp_tex, NULL, &dst);
     } else {
-        SDL_RenderCopy(renderer, game_tex, &src, &dst);
+        SDL_RenderCopy(renderer, game_tex, NULL, &dst);
     }
     if (fx) {
         if (fx_glow()) {
@@ -753,7 +795,7 @@ static void draw_game_ex(int backdrop) {
             if (glow_tex) {
                 SDL_SetRenderTarget(renderer, glow_tex);
                 SDL_SetTextureScaleMode(game_tex, SDL_ScaleModeLinear);
-                SDL_RenderCopy(renderer, game_tex, &src, NULL);
+                SDL_RenderCopy(renderer, game_tex, NULL, NULL);
                 SDL_SetTextureScaleMode(game_tex, cfg.filter == 1 ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
                 SDL_SetRenderTarget(renderer, target);
                 double g = 0.30 * fx_strength();
@@ -763,7 +805,7 @@ static void draw_game_ex(int backdrop) {
             }
         }
         if (fx_scan()) { ensure_scan_tex(src.h); if (scan_tex) SDL_RenderCopy(renderer, scan_tex, NULL, &dst); }
-        if (fx_curve()) { ensure_vig_tex(); if (vig_tex) SDL_RenderCopy(renderer, vig_tex, NULL, &dst); }
+        if (fx_curve()) { ensure_vig_tex(); if (vig_tex) SDL_RenderCopy(renderer, vig_tex, NULL, &vis); }
     }
     if (use_scene) {
         SDL_SetRenderTarget(renderer, NULL);
@@ -776,9 +818,9 @@ static void draw_game_ex(int backdrop) {
             if (h > wh) { h = wh; w = (int)((double)h * out_w / out_h + 0.5); }
             screen = (SDL_Rect){ (ww - w) / 2, (wh - h) / 2, w, h };
         }
-        SDL_Rect pic = { screen.x + (int)((double)dst.x * screen.w / out_w + 0.5), screen.y + (int)((double)dst.y * screen.h / out_h + 0.5),
-                         (int)((double)dst.w * screen.w / out_w + 0.5), (int)((double)dst.h * screen.h / out_h + 0.5) };
-        if (fx && fx_curve()) draw_curved(scene_tex, out_w, out_h, &dst, &pic);
+        SDL_Rect pic = { screen.x + (int)((double)vis.x * screen.w / out_w + 0.5), screen.y + (int)((double)vis.y * screen.h / out_h + 0.5),
+                         (int)((double)vis.w * screen.w / out_w + 0.5), (int)((double)vis.h * screen.h / out_h + 0.5) };
+        if (fx && fx_curve()) draw_curved(scene_tex, out_w, out_h, &vis, &pic);
         else SDL_RenderCopy(renderer, scene_tex, NULL, &screen);
         if (fx && fx_mask()) { ensure_mask_tex(pic.w); if (mask_tex) SDL_RenderCopy(renderer, mask_tex, NULL, &pic); }
     }
@@ -958,16 +1000,15 @@ static int write_png_rgb32(const char *path, const uint32_t *px, int w, int h) {
     return r;
 }
 
-/* the picture as shown (full height; in widescreen mode the visible part of the wide frame) */
+/* the picture as shown (in widescreen mode the visible part of the canvas), with the lines the
+   overscan crop hides */
 static int write_frame_png(const char *path) {
-    frame_to_rgb();
     SDL_Rect src;
     source_rect(&src);
-    uint32_t *px = malloc((size_t)src.w * FB_H * sizeof(uint32_t));
-    for (int y = 0; y < FB_H; y++) memcpy(px + (size_t)y * src.w, frame_rgb + (size_t)y * frame_w + src.x, (size_t)src.w * sizeof(uint32_t));
-    int r = write_png_rgb32(path, px, src.w, FB_H);
-    free(px);
-    return r;
+    int top = widescreen_on() ? WS_VBAND : 0;
+    if (src.y > top) { src.h += 2 * (src.y - top); src.y = top; }
+    frame_to_rgb(&src);
+    return write_png_rgb32(path, frame_rgb, frame_w, frame_h);
 }
 
 /* screenshot of the whole window (used for the UI self-test) */
@@ -1417,8 +1458,13 @@ static void refresh_gfx_info(void) {
             snprintf(hz, sizeof hz, "\nThe screen runs at %.0f Hz. For even motion set 60 Hz for this game: "
                      "quick access menu > Performance > per-game profile.", refresh_hz);
     }
+    if (!why[0] && integer_fill())
+        snprintf(why, sizeof why, "\nThe map fills the screen on the island and in villages; other scenes keep their bars.");
+    /* the part on the screen (Integer filling it lets the outermost pixels overhang the edges) */
+    int vis_w = (dst.x + dst.w < out_w ? dst.x + dst.w : out_w) - (dst.x > 0 ? dst.x : 0);
+    int vis_h = (dst.y + dst.h < out_h ? dst.y + dst.h : out_h) - (dst.y > 0 ? dst.y : 0);
     snprintf(gfx_all[GFX_INFO_ROW].info, sizeof gfx_all[GFX_INFO_ROW].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s%s",
-             dst.w, dst.h, out_w, out_h, where, (double)dst.h / src.h, why, hz);
+             vis_w, vis_h, out_w, out_h, where, (double)dst.h / src.h, why, hz);
     layout_gfx();
 }
 
@@ -1830,7 +1876,7 @@ static int trigger_selftest(void) {
 
 static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
-           "                   [--game-shot out.png [frames]] [--rewind-test N] [--list-controllers [out.txt]]\n"
+           "                   [--game-shot out.png [frames] [--state-load state]] [--rewind-test N] [--list-controllers [out.txt]]\n"
            "                   [--list-modes [out.txt]] [--chord-test] [--trigger-test] [--stats out.txt]\n");
 }
 
@@ -1920,6 +1966,7 @@ int main(int argc, char **argv) {
     attach_parent_console();
 #endif
     const char *rom_arg = NULL, *selftest_png = NULL, *uishot_png = NULL, *gameshot_png = NULL, *list_pads_file = NULL, *stats_path = NULL;
+    const char *shot_state = NULL;
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
     const char *list_modes_file = NULL;
     int list_modes_flag = 0, chord_test = 0;
@@ -1962,6 +2009,7 @@ int main(int argc, char **argv) {
             gameshot_png = argv[++i];
             if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) gameshot_frames = atoi(argv[++i]);
         }
+        else if (!strcmp(argv[i], "--state-load") && i + 1 < argc) shot_state = argv[++i];
         else if (!strcmp(argv[i], "--rewind-test") && i + 1 < argc) rewind_test = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chord-test")) chord_test = 1;
         else if (!strcmp(argv[i], "--trigger-test")) trigger_test_flag = 1;
@@ -2116,7 +2164,21 @@ int main(int argc, char **argv) {
     if (gameshot_png) {
         /* the game picture as the player sees it, with the current graphics settings and a sample message */
         if (!rom_ok) { fprintf(stderr, "game-shot: no valid ROM (%s)\n", rom_status); SDL_Quit(); return 1; }
-        for (int i = 0; i < gameshot_frames; i++) { nes_set_pad(0, (i >= 150 && i < 160) ? 0x08 : 0); nes_run_frame(); audio_out_pump(1, cfg.volume); }
+        if (shot_state) {   /* from a save state (a slot file, or one nes-headless --state-save wrote) */
+            size_t len = nes_state_size();
+            void *buf = malloc(len);
+            FILE *f = nes_fopen(shot_state, "rb");
+            size_t n = f ? fread(buf, 1, len, f) : 0;
+            if (f) fclose(f);
+            int ok = n == len && nes_state_load(buf, len) == 0;
+            free(buf);
+            if (!ok) { fprintf(stderr, "game-shot: cannot load the state %s\n", shot_state); SDL_Quit(); return 1; }
+        }
+        for (int i = 0; i < gameshot_frames; i++) {   /* Start once to leave the title, unless starting from a state */
+            nes_set_pad(0, (!shot_state && i >= 150 && i < 160) ? 0x08 : 0);
+            nes_run_frame();
+            audio_out_pump(1, cfg.volume);
+        }
         osd("State saved to slot %d", cfg.state_slot);
         draw_game(); draw_overlays(1);
         SDL_RenderPresent(renderer);

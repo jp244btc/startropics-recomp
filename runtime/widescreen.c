@@ -1,10 +1,10 @@
 /*
- * widescreen.c - side bands for a 16:9 view, decoded from the game's own
- * map data.
+ * widescreen.c - the world beyond the edges of the picture, decoded from the
+ * game's own map data.
  *
  * The NES picture is 256 pixels wide and the nametables hold nothing beyond
- * it, so a real widescreen view has to be rebuilt from the level data in the
- * ROM. This module knows the format of the field engine's maps (the island
+ * it, so a real widescreen view (and a screen filled from edge to edge) has to
+ * be rebuilt from the level data in the ROM. This module knows the format of the field engine's maps (the island
  * overworld, Coralcola and its hut interiors; see docs/MAP_FORMATS.md): a
  * 16x16 grid of 256x240 screens held in RAM,
  * each screen a list of 15 run-length coded rows of 16x16 metatiles in a
@@ -14,14 +14,15 @@
  * so they join the real picture without a seam.
  *
  * Only background tiles are decoded: the game has no objects beyond the
- * 256-pixel edge (they are not simulated there), so there is nothing else
- * to show. Any scene this module does not understand, and any frame whose
- * scroll does not agree with the player position, gets black bands.
+ * edges of the picture (they are not simulated there), so there is nothing
+ * else to show. Any scene this module does not understand, and any frame whose
+ * scroll does not agree with the player position, gets black around the picture.
  */
 #include "widescreen.h"
 #include "nes.h"
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 /* RAM locations of the overworld engine (StarTropics, USA) */
 #define RAM_GAME_MODE   0x00    /* field engine: 0 = island overworld, 1 = town (same engine, another map set); 2+ = other scene types */
@@ -195,59 +196,106 @@ static int overworld_setup(mapset_t *m, int *camx_out, int *camy_out) {
     return 1;
 }
 
-/* Draws the background of the screen-space columns [sx0, sx0 + width) (sx0 may be
-   negative) into dst (stride bytes per line, WS_H lines) the way the PPU drew the
-   centre: from the frame's CHR banks and pattern table, the current palette and the
-   line's $2001 bits. Width is at most 256. Returns 0 when the map data is unreadable. */
-static int render_region(mapset_t *m, int camx, int camy, int sx0, int width, uint8_t *dst, int stride) {
-    cell_t cells[17][18];
-    int row0 = floordiv(camy, 16), nrows = floordiv(camy + WS_H - 1, 16) - row0 + 1;
-    int col0 = floordiv(camx + sx0, 16), ncols = floordiv(camx + sx0 + width - 1, 16) - col0 + 1;
-    if (nrows > 17) nrows = 17;
-    if (ncols > 18) ncols = 18;
-    for (int r = 0; r < nrows; r++)
-        for (int c = 0; c < ncols; c++) lookup_cell(m, col0 + c, row0 + r, &cells[r][c]);
-    if (m->bad) return 0;
+/* Draws the map under the rectangle [px0, px0 + width) x [py0, py0 + height) of the picture's
+   coordinates (the PPU's picture is 0-255 x 0-239; the rectangle may lie beyond it on any side,
+   at most WS_W wide) into dst (stride bytes per line) the way the PPU draws the background: from
+   the frame's CHR banks and pattern table and the current palette, with masks[r] as row r's
+   $2001 bits (background enable, grayscale). Returns 0 when the map data is unreadable. */
+static int render_block(mapset_t *m, int camx, int camy, int px0, int py0, int width, int height,
+                        const uint8_t *masks, uint8_t *dst, int stride) {
+    enum { MAX_COLS = WS_W / 16 + 2 };
+    cell_t cells[MAX_COLS];
+    if (width <= 0 || height <= 0) return 1;
+    int wx0 = camx + px0, col0 = floordiv(wx0, 16);
+    int ncols = floordiv(wx0 + width - 1, 16) - col0 + 1, cell_row = INT_MIN;
+    if (ncols > MAX_COLS) return 0;
 
     const uint8_t *chr[8];
     for (int i = 0; i < 8; i++) chr[i] = mapper_chr_bank_ptr(ppu.frame_chr_bank[i]);
     unsigned pt_base = (ppu.frame_ctrl & 0x10) ? 0x1000 : 0;
 
-    for (int y = 0; y < WS_H; y++) {
-        uint8_t mask = ppu.line_emph[y];
-        uint8_t *line = dst + y * stride;
-        uint8_t backdrop = (mask & 1) ? (ppu.palette[0] & 0x30) : ppu.palette[0];
+    for (int y = 0; y < height; y++) {
+        uint8_t mask = masks[y], *line = dst + y * stride;
+        uint8_t gray = (mask & 1) ? 0x30 : 0xFF, backdrop = ppu.palette[0] & gray;
         if (!(mask & 0x08)) { memset(line, backdrop, (size_t)width); continue; }   /* background disabled on this line */
-        int wy = camy + y, wrow = floordiv(wy, 16), ly = wy - wrow * 16;
-        const cell_t *crow = cells[wrow - row0];
+        int wy = camy + py0 + y, wrow = floordiv(wy, 16), ly = wy - wrow * 16;
+        if (wrow != cell_row) {   /* the cells of a metatile row, looked up once for its 16 lines */
+            for (int c = 0; c < ncols; c++) lookup_cell(m, col0 + c, wrow, &cells[c]);
+            if (m->bad) return 0;
+            cell_row = wrow;
+        }
         int ty = (ly >> 3) & 1, frow = ly & 7;
-        for (int x = 0; x < width; x++) {
-            int wx = camx + sx0 + x, wcol = floordiv(wx, 16), lx = wx - wcol * 16;
-            const cell_t *cell = &crow[wcol - col0];
-            if (!cell->valid) { line[x] = backdrop; continue; }
-            unsigned a = pt_base + cell->tiles[ty * 2 + (lx >> 3)] * 16u + frow;
-            const uint8_t *pt = chr[(a >> 10) & 7] + (a & 0x3FF);
-            int bit = 7 - (lx & 7);
-            int pix = ((pt[0] >> bit) & 1) | (((pt[8] >> bit) & 1) << 1);
-            uint8_t color = pix ? ppu.palette[cell->pal * 4 + pix] : ppu.palette[0];
-            if (mask & 1) color &= 0x30;
-            line[x] = color;
+        for (int x = 0; x < width;) {
+            int wx = wx0 + x, wcol = floordiv(wx, 16), lx = wx - wcol * 16;
+            int fine = lx & 7, run = 8 - fine;   /* the pixels of this tile on the line */
+            if (run > width - x) run = width - x;
+            const cell_t *cell = &cells[wcol - col0];
+            if (!cell->valid) {
+                memset(line + x, backdrop, (size_t)run);
+            } else {
+                unsigned a = pt_base + cell->tiles[ty * 2 + (lx >> 3)] * 16u + frow;
+                const uint8_t *pt = chr[(a >> 10) & 7] + (a & 0x3FF);
+                const uint8_t *pal = ppu.palette + cell->pal * 4;
+                for (int i = 0; i < run; i++) {
+                    int bit = 7 - fine - i;
+                    int pix = ((pt[0] >> bit) & 1) | (((pt[8] >> bit) & 1) << 1);
+                    line[x + i] = (pix ? pal[pix] : ppu.palette[0]) & gray;
+                }
+            }
+            x += run;
         }
     }
     return 1;
 }
 
-int widescreen_render(uint8_t *out) {
-    for (int y = 0; y < WS_H; y++) memcpy(out + y * WS_W + WS_BAND, ppu.fb + y * 256, 256);
+int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
+    int px0 = x - WS_BAND, py0 = y - WS_VBAND;   /* the rectangle in the picture's coordinates */
+    int c0 = px0 > 0 ? px0 : 0, c1 = px0 + w < 256 ? px0 + w : 256;   /* the picture's columns in it */
+    if (c0 > px0 + w) c0 = px0 + w;
+    if (c1 < c0) c1 = c0;
     mapset_t m;
     int camx, camy;
-    if (overworld_setup(&m, &camx, &camy) &&
-        render_region(&m, camx, camy, -WS_BAND, WS_BAND, out, WS_W) &&
-        render_region(&m, camx, camy, 256, WS_BAND, out + WS_BAND + 256, WS_W))
-        return 1;
-    for (int y = 0; y < WS_H; y++) {
-        memset(out + y * WS_W, 0x0F, WS_BAND);
-        memset(out + y * WS_W + WS_BAND + 256, 0x0F, WS_BAND);
+    if (overworld_setup(&m, &camx, &camy)) {
+        /* the $2001 bits of each row: the PPU's own where it drew the background, else those of the
+           nearest line above that shows it (line 0's above the picture) */
+        uint8_t ref = ppu.line_emph[0];
+        for (int ly = 0; ly < py0 && ly < 240; ly++) if (ppu.line_emph[ly] & 0x08) ref = ppu.line_emph[ly];
+        for (int r = 0; r < h; r++) {
+            int ly = py0 + r;
+            if (ly >= 0 && ly < 240 && (ppu.line_emph[ly] & 0x08)) ref = ppu.line_emph[ly];
+            emph[r] = ref;
+        }
+        int ok = 1;
+        for (int r = 0; r < h && ok;) {
+            int ly = py0 + r, drawn = ly >= 0 && ly < 240 && (ppu.line_emph[ly] & 0x08), n = 1;
+            while (r + n < h) {   /* the rows of the same kind: the PPU drew their background or it did not */
+                int l2 = py0 + r + n;
+                if ((l2 >= 0 && l2 < 240 && (ppu.line_emph[l2] & 0x08)) != drawn) break;
+                n++;
+            }
+            uint8_t *dst = out + (size_t)r * w;
+            if (!drawn) {   /* the map across the whole width */
+                ok = render_block(&m, camx, camy, px0, ly, w, n, emph + r, dst, w);
+            } else {        /* the PPU's pixels, the map beside them */
+                if (px0 < c0) ok = render_block(&m, camx, camy, px0, ly, c0 - px0, n, emph + r, dst, w);
+                if (ok && c1 < px0 + w) ok = render_block(&m, camx, camy, c1, ly, px0 + w - c1, n, emph + r, dst + (c1 - px0), w);
+                for (int i = 0; i < n && c0 < c1; i++)
+                    memcpy(dst + (size_t)i * w + (c0 - px0), ppu.fb + (ly + i) * 256 + c0, (size_t)(c1 - c0));
+            }
+            r += n;
+        }
+        if (ok) return 1;
+    }
+    /* not understood: the picture as the PPU drew it, black around it */
+    for (int r = 0; r < h; r++) {
+        int ly = py0 + r;
+        uint8_t *dst = out + (size_t)r * w;
+        memset(dst, 0x0F, (size_t)w);
+        emph[r] = 0;
+        if (ly >= 0 && ly < 240) {
+            if (c0 < c1) memcpy(dst + (c0 - px0), ppu.fb + ly * 256 + c0, (size_t)(c1 - c0));
+            emph[r] = ppu.line_emph[ly];
+        }
     }
     return 0;
 }
@@ -284,8 +332,8 @@ int widescreen_check(int *total_tiles, int *bad_pixels, int *total_pixels) {
 
     /* 2. the centre re-rendered with the band renderer against the PPU's pixels: only
           sprites and tiles the game changed directly in VRAM may differ */
-    static uint8_t centre[256 * WS_H];
-    if (render_region(&m, camx, camy, 0, 256, centre, 256)) {
+    static uint8_t centre[256 * 240];
+    if (render_block(&m, camx, camy, 0, 0, 256, 240, ppu.line_emph, centre, 256)) {
         int bp = 0;
         for (int y = 0; y < VISIBLE_H; y++)
             for (int x = 0; x < 256; x++)

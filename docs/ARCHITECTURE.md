@@ -153,18 +153,23 @@ resampler plus the 90 Hz / 440 Hz high-pass and 14 kHz low-pass stages.
 
 ## Widescreen
 
-`runtime/widescreen.c` draws 96 extra pixels on each side of the frame from the
-overworld's own map data (format in `docs/MAP_FORMATS.md`): the scene is
-recognised from the game-mode variables, the camera is derived from the player
-position and the scroll the PPU latched for the frame (`ppu.frame_t`,
-`frame_x`, `frame_ctrl`, `frame_chr_bank`, snapshotted at scanline 0), and each
-16 x 16 cell is decoded through the same screen-grid / row / metatile / variant
-path the game's strip drawer uses. `ppu.line_emph` now keeps the whole `$2001`
-value per line so lines the game blanks stay blank in the bands. The headless
-harness (`--widescreen`) checks the decoder against the PPU's nametables and
-pixels. The frontend's "16:9 (widescreen)" aspect choice shows this frame; other
-scene types (dungeon rooms with the status-bar split) are not decoded and get
-black bars around the normal picture; the IRQ modes are described in the formats file.
+`runtime/widescreen.c` draws the world around the frame from the overworld's
+own map data (format in `docs/MAP_FORMATS.md`), on a 704 x 336 canvas: up to
+224 pixels on each side of the picture and 48 lines above and below it. The
+scene is recognised from the game-mode variables, the camera is derived from
+the player position and the scroll the PPU latched for the frame
+(`ppu.frame_t`, `frame_x`, `frame_ctrl`, `frame_chr_bank`, snapshotted at
+scanline 0), and each 16 x 16 cell is decoded through the same screen-grid /
+row / metatile / variant path the game's strip drawer uses. `ppu.line_emph`
+keeps the whole `$2001` value per line, so the renderer knows which lines the
+PPU left blank (the overworld's bottom 16, which show the map as well) and the
+emphasis of each. The frontend asks for the part it shows: 16:9 or 16:10 of
+the canvas at the pixel shape, or with Integer scaling in fullscreen every line
+and column the screen holds at the multiple. The headless harness
+(`--widescreen`) checks the decoder against the PPU's nametables and pixels.
+Other scene types (dungeon rooms with the status-bar split) are not decoded and
+get black bars around the normal picture; the IRQ modes are described in the
+formats file.
 
 ## Frontend features
 

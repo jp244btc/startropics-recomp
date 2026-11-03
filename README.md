@@ -64,13 +64,16 @@ keeps everything derived from the ROM on your own machine.
 NES game has no picture beyond the 256-pixel edge, so the port decodes the
 overworld's map data from your ROM (the screen grid, the run-length coded
 metatile rows and the metatile table; `docs/MAP_FORMATS.md`) and draws the
-world to the left and right of the normal picture with the same CHR banks,
-palette and scroll the PPU used, so there is no seam. The centre stays the
-game's own output. Only background is extended: the game simulates nothing
+world around the normal picture with the same CHR banks, palette and scroll
+the PPU used, so there is no seam. The centre stays the game's own output
+(the 16 lines the overworld leaves blank at the bottom show the map too). Only background is extended: the game simulates nothing
 beyond the edge, so no enemies or people appear there. Scenes whose format is
 not decoded (dungeons, menus, text screens) show the normal 4:3 picture between
-black bars. The pixels keep their 4:3 CRT shape, so 341 of the 448 decoded
-pixels are visible (318 with the overscan crop). Nothing is ever stretched: the
+black bars. The pixels keep their 4:3 CRT shape: a 16:9 picture shows 341
+columns (318 with the overscan crop). With Integer scaling in fullscreen the
+picture fills the whole screen at the largest whole multiple, with the map
+above, below and beside it (1280x800 at 3x on the Steam Deck); the decoder
+covers up to 704x336 pixels, enough for a 32:9 screen. Nothing is ever stretched: the
 Scaling row's "Stretch (distorts)" is the one option that changes the pixel shape.
 
 ## What works

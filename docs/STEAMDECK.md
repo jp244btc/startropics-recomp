@@ -38,8 +38,8 @@ Every button can be changed on the menu's Controls tab.
 Tips
 ----
 - Graphics > Scaling: Fit (the default) fills the 1280x800 screen with the 16:10 picture.
-  Integer keeps exact pixels at 3x: with a widescreen aspect it is 1280x720 with thin bars
-  above and below (Overscan crop off; 1280x672 with it on).
+  Integer keeps exact pixels at 3x and fills the screen too, with more of the map above,
+  below and at the sides (on the island and in villages; other scenes keep their bars).
 - Deck OLED: for perfectly even motion set the refresh rate to 60 Hz for this game in
   the quick access menu (Performance). The NES runs at 60 Hz.
 - Latency: Graphics > Low-latency sync (on by default) hands each frame to the screen

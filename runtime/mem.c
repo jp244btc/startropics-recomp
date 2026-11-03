@@ -33,6 +33,17 @@ uint8_t mem_read_slow(uint16_t a) {
     return mapper.prg_ptr[(a >> 13) & 3][a & 0x1fff];
 }
 
+/* read without side effects: no register access, no open-bus update */
+uint8_t nes_peek(uint16_t a) {
+    if (a < 0x2000) return ram[a & 0x7ff];
+    if (a >= 0x8000) return mapper.prg_ptr[(a >> 13) & 3][a & 0x1fff];
+    if (a >= 0x6000) {
+        if (cart.mapper == 4 && cart.mmc6) return (a >= 0x7000) ? cart.wram[a & 0x3ff] : 0;
+        return cart.wram[a & 0x1fff];
+    }
+    return 0;
+}
+
 void mem_write_slow(uint16_t a, uint8_t v) {
     if (a < 0x2000) { ram[a & 0x7ff] = v; return; }
     cpu.open_bus = v;

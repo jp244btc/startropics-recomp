@@ -11,7 +11,7 @@ ifeq ($(origin CC),default)
   CC := gcc
 endif
 PYTHON  ?= python
-CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
+CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers
 LDFLAGS ?=
 # Windows detection: $(OS) is set by cmd/PowerShell, uname by MSYS2/MinGW shells
 UNAME := $(shell uname -s 2>/dev/null)
@@ -37,16 +37,33 @@ GEN_OBJ := $(patsubst $(GEN)/%.c,$(BUILD)/gen/%.o,$(GEN_SRC))
 
 SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
 ifeq ($(WINDOWS),1)
-  # single-file executable: SDL2 linked statically, no DLLs to ship
-  SDL_LIBS := $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -ldxgi -static-libgcc
+  # single-file executable: SDL2 and the MinGW runtime (libgcc, winpthread) linked statically, so
+  # nothing but Windows' own DLLs is needed; a stray 32-bit libwinpthread-1.dll on the PATH would
+  # otherwise stop the program with error 0xc000007b
+  SDL_LIBS := -static $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -ldxgi -static-libgcc
   PLATFORM := win64
 else
   SDL_LIBS := $(shell sdl2-config --libs 2>/dev/null)
   PLATFORM := $(shell uname -s | tr A-Z a-z)-$(shell uname -m)
 endif
 
-FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c
-FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC))
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c
+
+# ---- RetroAchievements (optional): third_party/rcheevos.mk defines RCHEEVOS_SRC / RCHEEVOS_CFLAGS /
+#      RCHEEVOS_LIBS when the MIT-licensed rcheevos library is vendored; frontend/achievements.c uses it.
+RCHEEVOS_SRC :=
+RCHEEVOS_CFLAGS :=
+RCHEEVOS_LIBS :=
+-include third_party/rcheevos.mk
+ifneq ($(and $(wildcard frontend/achievements.c),$(RCHEEVOS_SRC)),)
+  FRONTEND_SRC += frontend/achievements.c
+  RCHEEVOS_OBJ := $(patsubst %.c,$(BUILD)/rc/%.o,$(notdir $(RCHEEVOS_SRC)))
+else
+  FRONTEND_SRC += frontend/achievements_stub.c
+  RCHEEVOS_OBJ :=
+  RCHEEVOS_LIBS :=
+endif
+FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC)) $(RCHEEVOS_OBJ)
 ifeq ($(WINDOWS),1)
   # executable icon + version info (Explorer, taskbar)
   WINDRES ?= windres
@@ -90,11 +107,19 @@ startropics: $(BUILD)/startropics$(EXE)
 
 $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
-	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(RCHEEVOS_LIBS) $(LDFLAGS)
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h
+# rcheevos sources compile with their own flags (search path for the vendored tree)
+define RC_RULE
+$(BUILD)/rc/$(notdir $(basename $(1))).o: $(1)
+	@mkdir -p $(BUILD)/rc
+	$(CC) -O2 -std=gnu11 -w $(RCHEEVOS_CFLAGS) -c $$< -o $$@
+endef
+$(foreach src,$(RCHEEVOS_SRC),$(eval $(call RC_RULE,$(src))))
+
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(SDL_CFLAGS) -Iruntime -c $< -o $@
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(RCHEEVOS_CFLAGS) -Iruntime -c $< -o $@
 
 $(BUILD)/fe_resources.o: frontend/startropics.rc frontend/startropics.ico
 	@mkdir -p $(BUILD)
@@ -105,6 +130,7 @@ dist: $(BUILD)/startropics$(EXE)
 	rm -rf dist/startropics && mkdir -p dist/startropics
 	cp $(BUILD)/startropics$(EXE) dist/startropics/
 	cp docs/PLAYERS.md dist/startropics/README.txt
+	@test -z "$(RCHEEVOS_SRC)" || cp third_party/rcheevos/LICENSE dist/startropics/LICENSE-rcheevos.txt
 	$(PYTHON) -c "import shutil; shutil.make_archive('dist/startropics-$(PLATFORM)', 'zip', 'dist', 'startropics')"
 	@echo "package: dist/startropics-$(PLATFORM).zip"
 

@@ -137,6 +137,15 @@ uint8_t input_read(const int key[NES_BUTTONS], const int pad[NES_BUTTONS]) {
     return b;
 }
 
+int input_held(int key, int pad) {
+    const Uint8 *ks = SDL_GetKeyboardState(NULL);
+    SDL_Scancode sc = SDL_GetScancodeFromKey((SDL_Keycode)key);
+    if (sc != SDL_SCANCODE_UNKNOWN && ks[sc]) return 1;
+    if (pad >= 0 && pad < SDL_CONTROLLER_BUTTON_MAX)
+        for (int p = 0; p < npads; p++) if (SDL_GameControllerGetButton(pads[p], (SDL_GameControllerButton)pad)) return 1;
+    return 0;
+}
+
 /* NES A (jump) on the right face button, NES B (attack) on the bottom one: the NES layout */
 void input_default_pads(int pad[NES_BUTTONS]) {
     pad[0] = SDL_CONTROLLER_BUTTON_B;

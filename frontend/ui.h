@@ -3,7 +3,7 @@
 #define UI_H
 #include <SDL.h>
 
-enum { UI_ACTION, UI_CHOICE, UI_INT, UI_KEY, UI_INFO };
+enum { UI_ACTION, UI_CHOICE, UI_INT, UI_KEY, UI_INFO, UI_TEXT };
 
 typedef struct ui_item {
     const char *label;
@@ -16,7 +16,12 @@ typedef struct ui_item {
     const char *suffix;           /* INT: text after the number */
     char info[400];               /* INFO: free text, '\n' separates lines */
     int *pad;                     /* KEY: optional game-controller button bound alongside the key (-1 = none) */
+    char *text;                   /* TEXT: the edited string (Enter on the row edits it, Enter again keeps it, Esc cancels) */
+    int text_cap;                 /* TEXT: size of the buffer */
+    int masked;                   /* TEXT: show * instead of the characters (passwords) */
 } ui_item;
+
+enum { UI_CAPTURE_NONE = 0, UI_CAPTURE_KEY = 1, UI_CAPTURE_TEXT = 2 };
 
 typedef struct {
     const char *name;
@@ -33,7 +38,8 @@ typedef struct ui_menu {
     int ntabs;
     int tab;                      /* selected tab */
     int focus;                    /* 0 = tab column, 1 = items */
-    int capture;                  /* waiting for a key to bind */
+    int capture;                  /* UI_CAPTURE_KEY: waiting for a key to bind; UI_CAPTURE_TEXT: editing a text row */
+    char text_backup[256];        /* the text row's value when editing began, restored on Esc */
     const char *title, *subtitle;
     const char *hint;             /* bottom line */
     char status[240];             /* line above the hint */

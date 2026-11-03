@@ -183,6 +183,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--state-save") && i + 1 < argc) state_save = argv[++i];
         else if (!strcmp(argv[i], "--state-load") && i + 1 < argc) state_load = argv[++i];
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
+        else if (!strcmp(argv[i], "--no-sprite-limit")) ppu_no_sprite_limit = true;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_addr = (int)strtol(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--trace-start") && i + 1 < argc) trace_start = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--debug-log") && i + 1 < argc) debug_log = argv[++i];

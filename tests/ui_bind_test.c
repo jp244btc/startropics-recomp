@@ -83,6 +83,37 @@ int main(int argc, char **argv) {
           "default pad layout: NES A = pad B, NES B = pad A, Start = Start");
     (void)keys;
 
+    /* 9. text rows: Enter edits, typed text and Backspace apply, Enter keeps, Escape restores */
+    {
+        char name[16] = "old";
+        ui_item titems[2];
+        memset(titems, 0, sizeof titems);
+        titems[0] = (ui_item){ "User name", UI_TEXT, 21, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL, name, sizeof name, 0 };
+        titems[1] = (ui_item){ "Log in", UI_ACTION, 22, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+        ui_tab ttab = { "Achievements", titems, 2, 0 };
+        ui_menu tm; memset(&tm, 0, sizeof tm);
+        tm.tabs = &ttab; tm.ntabs = 1; tm.focus = 1; tm.hover_tab = tm.hover_item = -1;
+        e = key(&tm, SDLK_RETURN, 0);
+        CHECK(e.type == UI_EV_NONE && tm.capture == UI_CAPTURE_TEXT, "Enter on a text row starts editing");
+        SDL_Event te; memset(&te, 0, sizeof te);
+        te.type = SDL_TEXTINPUT; strcpy(te.text.text, "ab");
+        ui_handle_event(&tm, &te);
+        e = key(&tm, SDLK_BACKSPACE, 0);
+        strcpy(te.text.text, "c"); ui_handle_event(&tm, &te);
+        CHECK(strcmp(name, "oldac") == 0 && tm.capture == UI_CAPTURE_TEXT, "typed text is appended and Backspace deletes (oldac)");
+        e = key(&tm, SDLK_DOWN, 0);
+        CHECK(ttab.sel == 0 && tm.capture == UI_CAPTURE_TEXT, "arrow keys do not leave the row while editing");
+        e = key(&tm, SDLK_RETURN, 0);
+        CHECK(e.type == UI_EV_CHANGED && e.id == 21 && tm.capture == 0 && strcmp(name, "oldac") == 0, "Enter keeps the text and reports CHANGED");
+        key(&tm, SDLK_RETURN, 0);
+        strcpy(te.text.text, "zzz"); ui_handle_event(&tm, &te);
+        e = key(&tm, SDLK_ESCAPE, 0);
+        CHECK(e.type == UI_EV_NONE && tm.capture == 0 && strcmp(name, "oldac") == 0, "Escape restores the previous text");
+        e = key(&tm, SDLK_DOWN, 0);
+        e = key(&tm, SDLK_RETURN, 0);
+        CHECK(e.type == UI_EV_ACTIVATE && e.id == 22, "the action row below still activates");
+    }
+
     printf("%s (%d failure%s)\n", failures ? "UI BINDING TEST FAILED" : "UI BINDING TEST PASSED", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

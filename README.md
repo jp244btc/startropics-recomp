@@ -23,7 +23,7 @@ your .nes again, at run time, for CHR graphics, level data, text, music
 
 `make dist` packages a single executable (SDL2 linked statically, no DLLs) with a
 launcher in the style of the N64 recompilation projects: a tabbed menu
-(**Play / Graphics / Audio / Controls / ROM**) over a hero backdrop. On the ROM tab
+(**Play / Graphics / Audio / Controls / Achievements / ROM**) over a hero backdrop. On the ROM tab
 "Choose ROM file..." opens the system file dialog; dropping a `.nes` file onto the
 window or passing it on the command line also works. The file's hash is checked
 and anything that is not a StarTropics dump is refused. Once a valid dump is
@@ -33,11 +33,18 @@ and the dimmed, upscaled title screen becomes the backdrop. Put a
 `launcher-background.bmp` next to the executable to use a picture of your own
 instead (no artwork is bundled: Nintendo's promotional art cannot be shipped).
 
-Options (all saved to `startropics.ini`): windowed / fullscreen, window size
-1x-6x, scaling (integer / fit window / stretch), aspect ratio (square pixels 8:7,
-4:3 CRT, 16:9 or 16:10 widescreen: below), filter (nearest / linear / sharp), overscan crop,
-volume, and rebinding of the eight NES buttons. Esc in game opens the same menu
-as a pause screen. XInput and other gamepads are handled through SDL's game
+Options (all saved to `startropics.ini`): windowed / fullscreen / exclusive
+fullscreen, resolution presets (720p, 1280x800, 1080p, 1440p, 2560x1600, 4K: the
+window size, the exclusive display mode, or the render size in borderless
+fullscreen), window size 1x-6x, scaling (integer / fit window / stretch), aspect
+ratio (square pixels 8:7, 4:3 CRT, 16:9 or 16:10 widescreen: below), filter
+(nearest / linear / sharp), CRT-style shaders (scanlines, aperture mask, glow,
+curvature; three strengths), overscan crop, a no-sprite-limit mode (every sprite
+on a line is drawn, so nothing flickers), volume, and rebinding of the eight NES
+buttons and the rewind key. Nine save state slots, rewind (hold a key to step
+back through the last minutes of play) and RetroAchievements (log in on the
+Achievements tab; unlocks pop up in game; hardcore mode supported) are built in.
+Esc in game opens the same menu as a pause screen. XInput and other gamepads are handled through SDL's game
 controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
 the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
 a generic joystick layout, and `startropics --list-controllers out.txt` writes
@@ -147,12 +154,36 @@ adjustable on the Graphics and Audio tabs, and `startropics --play --stats
 out.txt` logs the measured pacing once a second.
 
 Hotkeys: **Esc** menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
-**Tab** (hold) fast-forward, **P** pause, **F5** / **F8** save / load state, **F12**
-screenshot (`screenshots/`), **Ctrl+R** reset. Keys and display settings are in
-the menu and in `startropics.ini` next to the executable.
+**Tab** (hold) fast-forward, **P** pause, **F5** / **F8** save / load state,
+**F6** / **F7** previous / next save state slot (nine per ROM), **Backspace** (hold;
+pad RB) rewind, **F12** screenshot (`screenshots/`), **Ctrl+R** reset. Keys and
+display settings are in the menu and in `startropics.ini` next to the executable.
 
 Battery saves go to `saves/<rom name>.sav` (the raw 1 KiB MMC6 RAM, written when
-it changes and on exit).
+it changes and on exit); save states to `saves/<rom name>.state1` .. `.state9`.
+
+### Shaders, rewind, achievements
+
+The shader presets are composed from textured render passes on the SDL renderer
+(a scanline beam profile stretched over the picture, an aperture-grille mask
+multiplied in at screen resolution, a glow added back from a small copy of the
+frame, and barrel curvature with vignette drawn through a mesh), so they work on
+every backend without a shader language and add nothing to the input path.
+
+Rewind keeps a history of machine states as run-length-coded XOR deltas
+(`frontend/rewind.c`): a state is about 24 KB, a delta typically under 1 KB, so
+the 32 MB history holds many minutes at 30 snapshots a second. Holding the key
+steps back two frames per frame shown, re-running each restored state for its
+picture and sound.
+
+RetroAchievements support uses the official
+[rcheevos](https://github.com/RetroAchievements/rcheevos) client library,
+vendored under `third_party/rcheevos` (MIT licence; the licence text ships with
+the package). The ROM is identified by the RetroAchievements hash (the MD5 of
+the headerless image; StarTropics USA is game 1985), achievement logic reads the
+emulated memory through a side-effect-free peek, HTTP runs on worker threads
+(WinHTTP on Windows, libcurl elsewhere when available) and only the session
+token is stored. Hardcore mode disables save state loading and rewind.
 
 ## How it works
 
@@ -169,7 +200,8 @@ it changes and on exit).
   that doubles as the fallback for untranslated code and as the reference model.
   The generated code and the interpreter share the same inline helpers, which is
   what makes exact cosimulation possible.
-* `frontend/sdl_main.c` is the player: window, audio, input, saves, states.
+* `frontend/sdl_main.c` is the player: window, audio, input, saves, states,
+  rewind, shaders; `frontend/achievements.c` is the RetroAchievements glue.
 
 Details, the timing model and the exact emission rules are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -182,6 +214,10 @@ make headless                      # interpreter-only harness
 make test                          # blargg suites through $6000 status reporting
 make headless-recomp               # harness with the recompiled code linked in
 python tests/cosim.py              # interpreter vs native, 6,500 scripted frames
+sh tests/run_ui_bind_test.sh       # menu rebinding and text rows (synthetic events)
+gcc -O2 -Ifrontend tests/rewind_test.c frontend/rewind.c -o build/rewind_test && build/rewind_test
+sh tests/run_ach_test.sh           # RetroAchievements module against the live server (network)
+build/startropics rom/*.nes --rewind-test 1200   # whole rewind path: every re-run frame must match
 ```
 
 The headless harness (`build/nes-headless --help`) can also script input
@@ -207,8 +243,9 @@ instruction that fell back to the interpreter, so repeating the cycle converges.
 ```
 recomp/        the static recompiler (Python) and symbols.txt (address labels, no game data)
 runtime/       hardware runtime + headless harness (C11)
-frontend/      SDL2 player
-tests/         accuracy tests, cosimulation, nestest comparison
+frontend/      SDL2 player (menu, video, audio, input, rewind, achievements)
+third_party/   rcheevos (RetroAchievements client, MIT) and its make include
+tests/         accuracy tests, cosimulation, nestest comparison, module tests
 docs/          architecture notes
 generated/     output of make recomp (git-ignored)
 rom/           your .nes file (git-ignored)

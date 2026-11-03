@@ -7,6 +7,9 @@
 #include <math.h>
 
 apu_t apu;
+static int16_t apu_ring[APU_RING_SIZE];   /* output samples; indices in apu_t */
+
+void apu_flush_samples(void) { apu.ring_read = apu.ring_write; }
 
 #define CPU_HZ 1789773u
 
@@ -179,7 +182,7 @@ static inline void emit_sample(float v) {
     double s = apu.lp_prev * 32767.0 * 1.4;
     if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
     uint32_t next = (apu.ring_write + 1) & (APU_RING_SIZE - 1);
-    if (next != apu.ring_read) { apu.ring[apu.ring_write] = (int16_t)s; apu.ring_write = next; }
+    if (next != apu.ring_read) { apu_ring[apu.ring_write] = (int16_t)s; apu.ring_write = next; }
     apu.samples_produced++;
 }
 
@@ -351,7 +354,7 @@ uint32_t apu_samples_available(void) {
 uint32_t apu_read_samples(int16_t *out, uint32_t max) {
     uint32_t n = 0;
     while (n < max && apu.ring_read != apu.ring_write) {
-        out[n++] = apu.ring[apu.ring_read];
+        out[n++] = apu_ring[apu.ring_read];
         apu.ring_read = (apu.ring_read + 1) & (APU_RING_SIZE - 1);
     }
     return n;

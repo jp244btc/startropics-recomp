@@ -10,6 +10,7 @@
 #include <stdio.h>
 
 ppu_t ppu;
+bool ppu_no_sprite_limit;
 
 static inline bool rendering_enabled(void) { return (ppu.mask & 0x18) != 0; }
 
@@ -118,6 +119,7 @@ static inline uint8_t reverse8(uint8_t b) {
 /* evaluate sprites for the next scanline (simplified, done at dot 257) */
 static void sprite_evaluate(int line) {
     int h = (ppu.ctrl & 0x20) ? 16 : 8;
+    int limit = ppu_no_sprite_limit ? 64 : 8;
     int n = 0;
     ppu.spr0_next = false;
     memset(ppu.soam, 0xFF, sizeof ppu.soam);
@@ -125,14 +127,11 @@ static void sprite_evaluate(int line) {
         int y = ppu.oam[i * 4];
         int row = line - y;
         if (row < 0 || row >= h) continue;
-        if (n < 8) {
-            memcpy(ppu.soam + n * 4, ppu.oam + i * 4, 4);
-            if (i == 0) ppu.spr0_next = true;
-            n++;
-        } else {
-            ppu.status |= 0x20;
-            break;
-        }
+        if (n == 8) ppu.status |= 0x20;        /* the overflow flag behaves as on hardware either way */
+        if (n >= limit) break;
+        memcpy(ppu.soam + n * 4, ppu.oam + i * 4, 4);
+        if (i == 0) ppu.spr0_next = true;
+        n++;
     }
     ppu.spr_count_next = (uint8_t)n;
 }
@@ -176,6 +175,20 @@ static inline void sprite_fetch_step(int dot, int line) {
         ppu.spr_x[i] = ppu.soam[i * 4 + 3];
         break; }
     default: break;
+    }
+}
+
+/* no-sprite-limit mode: sprites 9..64 of the line are loaded without bus activity
+   (the hardware never fetches them, so the mapper must not see these reads) */
+static void load_extra_sprites(int line) {
+    for (int i = 8; i < ppu.spr_count_next; i++) {
+        uint8_t attr = ppu.soam[i * 4 + 2];
+        uint8_t lo = ppu_mem_read(sprite_pattern_addr(i, line, 0));
+        uint8_t hi = ppu_mem_read(sprite_pattern_addr(i, line, 1));
+        if (attr & 0x40) { lo = reverse8(lo); hi = reverse8(hi); }
+        ppu.spr_pat_lo[i] = lo; ppu.spr_pat_hi[i] = hi;
+        ppu.spr_attr[i] = attr;
+        ppu.spr_x[i] = ppu.soam[i * 4 + 3];
     }
 }
 
@@ -252,7 +265,10 @@ static inline void ppu_tick(void) {
                 ppu.oam_addr = 0;
                 if (prerender && dot >= 280 && dot <= 304) copy_y();
                 sprite_fetch_step(dot, sl);
-                if (dot == 320) { ppu.spr_count = ppu.spr_count_next; ppu.spr0_line = ppu.spr0_next; }
+                if (dot == 320) {
+                    if (ppu.spr_count_next > 8) load_extra_sprites(sl);
+                    ppu.spr_count = ppu.spr_count_next; ppu.spr0_line = ppu.spr0_next;
+                }
             } else if (dot >= 321 && dot <= 336) {
                 bg_fetch_step(dot);
                 shift_bg();

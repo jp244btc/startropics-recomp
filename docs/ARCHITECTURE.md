@@ -25,8 +25,17 @@ runtime/sys.c        power/reset, frame loop, save states
 runtime/headless.c   command-line harness (tests, scripting, screenshots, traces, coverage)
 runtime/recomp_rt.h  helpers used by the generated code
 recomp/recomp.py     the static recompiler
-frontend/sdl_main.c  SDL2 player
+frontend/sdl_main.c  SDL2 player: menu, scaling and shader passes, run-ahead, save slots, rewind, overlays
+frontend/ui.c        the tabbed menu (choices, numbers, key capture, text rows)
+frontend/rewind.c    rewind history: XOR deltas, run-length coded, in a byte ring
+frontend/achievements.c  RetroAchievements on rcheevos (third_party/rcheevos); achievements_stub.c without it
 ```
+
+Options that are not machine state (`ppu_no_sprite_limit`) live outside the
+state structs, so a save state or a rewind step never changes a setting. Save
+states (version 2) leave out the PPU frame buffer, which every frame rewrites,
+and the APU's sample ring, which lives outside `apu_t` with only its indices in
+the state; a state is about 24 KB.
 
 ## Timing model
 
@@ -156,6 +165,40 @@ harness (`--widescreen`) checks the decoder against the PPU's nametables and
 pixels. The frontend's "16:9 (widescreen)" aspect choice shows this frame; other
 scene types (dungeon rooms with the status-bar split) are not decoded and get
 black bars around the normal picture; the IRQ modes are described in the formats file.
+
+## Frontend features
+
+**No sprite limit.** Sprite evaluation keeps the hardware's overflow flag
+behaviour but, with the option on, copies every sprite on the line into a
+64-entry secondary OAM; sprites 9-64 are loaded at the end of the sprite fetch
+window without touching the PPU address bus, so the MMC6 IRQ counter sees
+exactly the fetches it would see on the console.
+
+**Rewind.** Every other frame the frontend takes a state and pushes it into
+`rewind.c`, which stores the XOR against the previous state as runs of unchanged
+bytes and runs of literals (varint lengths). Records are contiguous in one byte
+ring; a new record that would cross the end goes to the front, and only the
+oldest record can overlap the space a new one needs, so eviction walks from the
+oldest. Stepping back applies the newest record to the current state. While the
+key is held the frontend pops a record, loads it, runs one frame (so the picture
+and the sound of that moment are regenerated) and shows it: two frames of
+history per shown frame.
+
+**Shaders.** `draw_game_ex` composes the picture into a render target when a
+shader or an internal resolution is active: game frame (nearest / linear / sharp
+prescale) into the destination rectangle, a glow pass (a third-size copy added
+back with alpha), a scanline texture (eight texels per game line, linear
+filtered, alpha black) and the vignette; then the target is drawn to the window
+either 1:1, scaled, or as a 32x24 mesh with barrel distortion
+(`SDL_RenderGeometry`), and the aperture mask (one texel per screen pixel, MOD
+blend) goes on top.
+
+**RetroAchievements.** `achievements.c` wraps rc_client: memory reads go through
+`nes_peek` (no side effects, CPU addresses), HTTP requests run on worker threads
+and are delivered on the main thread from `ach_pump()`, `ach_frame()` runs the
+achievement logic once per real frame (not run-ahead or rewind frames), and the
+frontend honours hardcore mode by refusing state loads and rewind and by
+resetting the machine when the client asks for it.
 
 ## Where to take it next
 

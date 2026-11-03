@@ -80,7 +80,7 @@ typedef struct {
     uint8_t  read_buffer;
     uint8_t  open_bus;
     uint8_t  oam[256];
-    uint8_t  soam[32];
+    uint8_t  soam[256];         /* secondary OAM: 8 sprites, or up to 64 with ppu_no_sprite_limit */
     uint8_t  palette[32];
     uint8_t  vram[4096];
     uint16_t nt_offset[4];      /* nametable slot -> offset into vram */
@@ -97,7 +97,7 @@ typedef struct {
     uint8_t  nt_latch, at_latch, pt_lo_latch, pt_hi_latch;
     /* sprites for the line being rendered */
     uint8_t  spr_count;
-    uint8_t  spr_pat_lo[8], spr_pat_hi[8], spr_attr[8], spr_x[8];
+    uint8_t  spr_pat_lo[64], spr_pat_hi[64], spr_attr[64], spr_x[64];
     bool     spr0_line;         /* sprite 0 is among this line's sprites */
     /* sprites evaluated for the next line */
     uint8_t  spr_count_next;
@@ -191,7 +191,8 @@ typedef struct {
     double   hp90_prev_in, hp90_prev_out;
     double   hp440_prev_in, hp440_prev_out;
     double   lp_prev;
-    int16_t  ring[APU_RING_SIZE];
+    /* the sample ring itself lives outside the struct (apu.c) so save states and rewind
+       snapshots stay small; the indices are state, so a restore discards later samples */
     uint32_t ring_write, ring_read;
     uint64_t samples_produced;
 } apu_t;
@@ -281,6 +282,7 @@ uint8_t ppu_reg_read(int reg);
 void    ppu_reg_write(int reg, uint8_t v);
 void    ppu_oam_dma(uint8_t page);
 void    ppu_update_nmi(void);
+extern bool ppu_no_sprite_limit;   /* option, not machine state: draw every sprite on a line instead of the hardware's 8 (no flicker) */
 
 /* apu.c */
 void    apu_reset(void);
@@ -290,10 +292,12 @@ void    apu_write(uint16_t a, uint8_t v);
 uint32_t apu_samples_available(void);
 uint32_t apu_read_samples(int16_t *out, uint32_t max);
 void    apu_set_sample_rate(uint32_t hz);
+void    apu_flush_samples(void);   /* drop the samples not yet read (after a state load that is not run-ahead) */
 
 /* mem.c */
 uint8_t mem_read_slow(uint16_t a);
 void    mem_write_slow(uint16_t a, uint8_t v);
+uint8_t nes_peek(uint16_t a);   /* side-effect-free read (RAM, PRG RAM, ROM; 0 for registers) for tools and achievements */
 
 /* cpu.c */
 void    cpu_power(void);

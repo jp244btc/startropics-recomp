@@ -39,6 +39,20 @@ static int item_value_text(const ui_item *it, int capture, char *buf, size_t n) 
         else if (it->pad) snprintf(buf, n, "%s  /  pad %s", SDL_GetKeyName((SDL_Keycode)(it->value ? *it->value : 0)), input_pad_name(*it->pad));
         else snprintf(buf, n, "%s", SDL_GetKeyName((SDL_Keycode)(it->value ? *it->value : 0)));
         return 1;
+    case UI_TEXT: {
+        const char *t = it->text ? it->text : "";
+        size_t len = strlen(t);
+        if (it->masked) {
+            size_t k = len < n - 2 ? len : n - 2;
+            memset(buf, '*', k); buf[k] = 0;
+        } else {
+            /* the end of a long string is what matters while typing */
+            size_t keep = n - 2;
+            snprintf(buf, n, "%s", len > keep ? t + (len - keep) : t);
+        }
+        if (capture) strncat(buf, "_", n - strlen(buf) - 1);
+        else if (!len) snprintf(buf, n, "(none)");
+        return 1; }
     default:
         buf[0] = 0;
         return 0;
@@ -133,6 +147,13 @@ void ui_draw(SDL_Renderer *r, ui_menu *m, int ww, int wh) {
         font_draw(r, rc.x + mg, ty, s, selected ? C_TEXT : C_DIM, 0, it->label);
         char vbuf[96];
         if (item_value_text(it, m->capture && selected, vbuf, sizeof vbuf)) {
+            if (it->kind == UI_TEXT && !(m->capture && selected) && it->text && !it->text[0]) {
+                /* an empty text row shows a dim placeholder */
+                int ew = font_width(vbuf, s);
+                font_draw(r, rc.x + rc.w - mg - ew, ty, s, C_DIM, 0, vbuf);
+                iy += row + s;
+                continue;
+            }
             int aw = FONT_CELL_W * s;                      /* arrow glyph width */
             int rx = rc.x + rc.w - mg - aw;                /* '>' position */
             int vw = font_width(vbuf, s);
@@ -182,20 +203,78 @@ static void move_sel(ui_tab *t, int dir) {
     }
 }
 
+static void end_capture(ui_menu *m) {
+    if (m->capture == UI_CAPTURE_TEXT) SDL_StopTextInput();
+    m->capture = UI_CAPTURE_NONE;
+}
+
 static ui_event activate(ui_menu *m, ui_item *it) {
     switch (it->kind) {
     case UI_ACTION: return ev(UI_EV_ACTIVATE, it->id);
     case UI_CHOICE: return change(it, +1);
-    case UI_KEY: m->capture = 1; return ev(UI_EV_NONE, 0);
+    case UI_KEY: m->capture = UI_CAPTURE_KEY; return ev(UI_EV_NONE, 0);
+    case UI_TEXT:
+        if (!it->text || it->text_cap < 2) return ev(UI_EV_NONE, 0);
+        snprintf(m->text_backup, sizeof m->text_backup, "%s", it->text);
+        m->capture = UI_CAPTURE_TEXT;
+        SDL_StartTextInput();
+        return ev(UI_EV_NONE, 0);
     default: return ev(UI_EV_NONE, 0);
+    }
+}
+
+/* append UTF-8 text to the row being edited (control characters and newlines dropped) */
+static void text_append(ui_item *it, const char *s) {
+    size_t len = strlen(it->text);
+    for (; *s; s++) {
+        if ((unsigned char)*s < 32 || *s == 127) continue;
+        if (len + 1 >= (size_t)it->text_cap) break;
+        it->text[len++] = *s;
+    }
+    it->text[len] = 0;
+}
+
+static void text_backspace(ui_item *it) {
+    size_t len = strlen(it->text);
+    if (!len) return;
+    len--;
+    while (len > 0 && ((unsigned char)it->text[len] & 0xC0) == 0x80) len--;   /* whole UTF-8 sequence */
+    it->text[len] = 0;
+}
+
+static ui_event text_key(ui_menu *m, ui_item *it, SDL_Keycode k, Uint16 mod) {
+    switch (k) {
+    case SDLK_RETURN: case SDLK_KP_ENTER:
+        end_capture(m);
+        return ev(UI_EV_CHANGED, it->id);
+    case SDLK_ESCAPE:
+        snprintf(it->text, (size_t)it->text_cap, "%s", m->text_backup);
+        end_capture(m);
+        return ev(UI_EV_NONE, 0);
+    case SDLK_BACKSPACE:
+        text_backspace(it);
+        return ev(UI_EV_NONE, 0);
+    case SDLK_v:
+        if (mod & KMOD_CTRL) {
+            char *clip = SDL_GetClipboardText();
+            if (clip) { text_append(it, clip); SDL_free(clip); }
+        }
+        return ev(UI_EV_NONE, 0);
+    default:
+        return ev(UI_EV_NONE, 0);   /* characters arrive as SDL_TEXTINPUT */
     }
 }
 
 static ui_event key_action(ui_menu *m, SDL_Keycode k) {
     ui_tab *t = &m->tabs[m->tab];
     ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+    if (m->capture == UI_CAPTURE_TEXT) {
+        if (it && it->kind == UI_TEXT) return text_key(m, it, k, 0);
+        end_capture(m);
+        return ev(UI_EV_NONE, 0);
+    }
     if (m->capture && it && it->kind == UI_KEY) {
-        m->capture = 0;
+        m->capture = UI_CAPTURE_NONE;
         if (k == SDLK_ESCAPE) return ev(UI_EV_NONE, 0);
         if (it->value) *it->value = (int)k;
         return ev(UI_EV_CHANGED, it->id);
@@ -240,13 +319,32 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
     switch (e->type) {
     case SDL_KEYDOWN:
         /* a held key auto-repeats; while binding, only a fresh press may be captured */
-        if (m->capture && e->key.repeat) return ev(UI_EV_NONE, 0);
+        if (m->capture == UI_CAPTURE_KEY && e->key.repeat) return ev(UI_EV_NONE, 0);
+        if (m->capture == UI_CAPTURE_TEXT) {
+            ui_tab *t = &m->tabs[m->tab];
+            ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+            if (it && it->kind == UI_TEXT) return text_key(m, it, e->key.keysym.sym, e->key.keysym.mod);
+            end_capture(m);
+            return ev(UI_EV_NONE, 0);
+        }
         return key_action(m, e->key.keysym.sym);
+    case SDL_TEXTINPUT:
+        if (m->capture == UI_CAPTURE_TEXT) {
+            ui_tab *t = &m->tabs[m->tab];
+            ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+            if (it && it->kind == UI_TEXT) text_append(it, e->text.text);
+        }
+        return ev(UI_EV_NONE, 0);
     case SDL_CONTROLLERBUTTONDOWN:
+        if (m->capture == UI_CAPTURE_TEXT) {   /* the pad cannot type: A keeps the text, B cancels */
+            if (e->cbutton.button == SDL_CONTROLLER_BUTTON_A) return key_action(m, SDLK_RETURN);
+            if (e->cbutton.button == SDL_CONTROLLER_BUTTON_B) return key_action(m, SDLK_ESCAPE);
+            return ev(UI_EV_NONE, 0);
+        }
         if (m->capture) {   /* binding a pad button to the selected row */
             ui_tab *t = &m->tabs[m->tab];
             ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
-            m->capture = 0;
+            m->capture = UI_CAPTURE_NONE;
             if (it && it->kind == UI_KEY && it->pad) { *it->pad = e->cbutton.button; return ev(UI_EV_CHANGED, it->id); }
             return ev(UI_EV_NONE, 0);
         }
@@ -285,7 +383,7 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
     case SDL_MOUSEBUTTONDOWN: {
         if (e->button.button != SDL_BUTTON_LEFT) break;
         int x = e->button.x, y = e->button.y;
-        if (m->capture) { m->capture = 0; break; }
+        if (m->capture) { end_capture(m); break; }
         for (int i = 0; i < m->ntabs && i < UI_MAX_TABS; i++)
             if (in_rect(&m->tab_rects[i], x, y)) { m->tab = i; m->focus = 0; ui_select_first(m); return ev(UI_EV_NONE, 0); }
         ui_tab *t = &m->tabs[m->tab];

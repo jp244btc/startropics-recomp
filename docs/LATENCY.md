@@ -11,7 +11,7 @@ per line, in `Android/data/org.startropics.nativeport/files/args.txt`.
 | press until the pad is read | 0-16.7 ms | 0-16.7 ms (latched once a frame) | 0-16.7 ms | 0-16.7 ms |
 | the game's own reaction (StarTropics: 2 frames) | 33 ms | 33 ms (run-ahead off) | 0 (run-ahead 2) | 0 (run-ahead 2) |
 | pad read until the frame is handed over | - | ~1 ms | ~3 ms (frame delay) | ~5.5 ms |
-| handed over until on screen | 0 (the beam) | vsync off: shown torn at the next scan-out | 0-1 ms: handed over just before the vblank | 12.9-13.7 ms: the compositor's deadline plus 10.3 ms |
+| handed over until on screen | 0 (the beam) | vsync off: shown at the next scan-out | 0-1 ms: handed over just before the vblank | 12.9-13.7 ms: the compositor's deadline plus 10.3 ms |
 | scan-out to mid-screen | 8 ms | 8 ms | 8 ms (60 Hz) | 4 ms (120 Hz) |
 | **average, press to mid-screen** | **~50 ms** | **~50 ms**, more in a desktop window | **~20 ms** | **~31 ms** |
 | sound effects | 0 | ~60 ms (audio latency 60) | ~25-45 ms (Low / Normal) | ~32 ms queue plus Android's audio buffer |
@@ -93,7 +93,7 @@ frame waits. With Low-latency sync off, frames are presented with vsync: the
 smoothest motion, at up to one frame more latency. This has not been measured
 on a Deck.
 
-## Compared with Mesen 2
+## Compared with Mesen 2 and RetroArch
 
 Mesen 2's defaults, from its source (`Core/Shared/SettingTypes.h`): run-ahead 0,
 vertical sync off, audio latency 60 ms, and the controller state is updated at
@@ -102,11 +102,14 @@ scanline 241, once a frame.
 * At those defaults the port shows the game's reaction to a press two frames
   (33 ms) sooner on every platform: run-ahead 2 removes StarTropics' own delay.
 * With Mesen's run-ahead also set to 2 and vsync off, Mesen presents each frame
-  as soon as it is emulated and the display shows it torn; the port's Windows
-  build hands its frame over about 3 ms before the vblank. The two are within
-  a few milliseconds on average, and the port does not tear.
+  as soon as it is emulated; the port's Windows build hands its frame over about
+  3 ms before the vblank. The two are within a few milliseconds on average.
 * With Mesen's vsync on, Mesen waits 0-16.7 ms (about 8 ms on average) for the
   vblank, and the port is ahead by that.
+* RetroArch's defaults, from its source (`config.def.h`, `configuration.c`): run-ahead
+  off, frame delay 0, vsync on with up to three swap-chain images, audio latency 64 ms
+  (128 ms on Android). It keeps StarTropics' two frames too, reads the pad about a
+  frame before the picture is due, and can hold finished frames in the swap chain.
 * Mesen has no Android version. On the Pocket EVO the port's average from press
   to mid-screen (about 31 ms) is well below a real NES on a CRT (about 50 ms).
 

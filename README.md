@@ -197,7 +197,7 @@ adjustable on the Graphics and Audio tabs, and `startropics --play --stats
 out.txt` logs the measured pacing once a second. On Android each frame is locked to
 the compositor's own deadlines (Choreographer frame timelines) and the display runs at
 120 Hz where it can; on Linux and the Steam Deck frames go out without vsync, as in
-Mesen's default, so none waits in a queue. LATENCY.md compares the port with Mesen 2.
+Mesen's default, so none waits in a queue. LATENCY.md compares the port with Mesen 2 and RetroArch.
 
 Hotkeys: **Esc** or **Start + Select** together (pad or keyboard) menu, **LT + RT** together on Android and the Steam Deck, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
 **Tab** / pad RT (hold) fast-forward (within 1.5 s after a rewind it first goes forward again to where the rewind began), **P** pause, **F5** / **F8** save / load state,

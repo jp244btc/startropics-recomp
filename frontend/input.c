@@ -45,7 +45,12 @@ static void open_device(int index) {
     if (SDL_IsGameController(index)) {
         if (npads >= MAX_DEVICES) return;
         SDL_GameController *c = SDL_GameControllerOpen(index);
-        if (c) { pads[npads++] = c; printf("controller: %s\n", SDL_GameControllerName(c)); }
+        if (c) {
+            pads[npads++] = c;
+            char *map = SDL_GameControllerMapping(c);
+            printf("controller: %s\n  mapping: %s\n", SDL_GameControllerName(c), map ? map : "(none)");
+            if (map) SDL_free(map);
+        }
     } else {
         if (nsticks >= MAX_DEVICES) return;
         SDL_Joystick *j = SDL_JoystickOpen(index);
@@ -97,8 +102,16 @@ void input_handle_event(const SDL_Event *e) {
 #define TRIGGER_DOWN 16000   /* of 32767 */
 
 static int pad_button_down(SDL_GameController *c, int b) {
-    if (b == INPUT_PAD_LT) return SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > TRIGGER_DOWN;
-    if (b == INPUT_PAD_RT) return SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > TRIGGER_DOWN;
+    if (b == INPUT_PAD_LT || b == INPUT_PAD_RT) {
+        SDL_GameControllerAxis ax = b == INPUT_PAD_LT ? SDL_CONTROLLER_AXIS_TRIGGERLEFT : SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+#ifdef __ANDROID__
+        /* L2 / R2 that are plain buttons: SDL's Android driver reports them as joystick buttons
+           15 / 16, which no controller mapping uses */
+        if (!SDL_GameControllerHasAxis(c, ax))
+            return SDL_JoystickGetButton(SDL_GameControllerGetJoystick(c), b == INPUT_PAD_LT ? 15 : 16);
+#endif
+        return SDL_GameControllerGetAxis(c, ax) > TRIGGER_DOWN;
+    }
     return b >= 0 && b < SDL_CONTROLLER_BUTTON_MAX && SDL_GameControllerGetButton(c, (SDL_GameControllerButton)b);
 }
 
@@ -152,10 +165,11 @@ int input_held(int key, int pad) {
     return 0;
 }
 
-/* NES A (jump) on the right face button, NES B (attack) on the bottom one: the NES layout */
+/* NES A (jump) on A and NES B (attack) on X, the button left of it: on an Xbox (XInput) pad the
+   A label matches, and B sits to the left of A as on the NES controller */
 void input_default_pads(int pad[NES_BUTTONS]) {
-    pad[0] = SDL_CONTROLLER_BUTTON_B;
-    pad[1] = SDL_CONTROLLER_BUTTON_A;
+    pad[0] = SDL_CONTROLLER_BUTTON_A;
+    pad[1] = SDL_CONTROLLER_BUTTON_X;
     pad[2] = SDL_CONTROLLER_BUTTON_BACK;
     pad[3] = SDL_CONTROLLER_BUTTON_START;
     pad[4] = SDL_CONTROLLER_BUTTON_DPAD_UP;

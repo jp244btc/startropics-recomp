@@ -183,9 +183,10 @@ oldest. Stepping back applies the newest record to the current state. While the
 key is held the frontend pops a record, loads it, runs one frame (so the picture
 and the sound of that moment are regenerated) and shows it: two frames of
 history per shown frame. Stepping back leaves each record's bytes in the ring (only the
-index forgets it), so fast-forward right after a rewind applies the same records again,
-newest last, and returns to exactly the state the rewind started from; the next push
-(playing on) forgets them.
+index forgets it), so fast-forward after a rewind applies the same records again,
+newest last, and returns to exactly the state the rewind started from. For 1.5 s after a
+rewind (while there is a rewound stretch) the frontend makes no new record, so a
+fast-forward pressed in that time still finds them; the next push forgets them.
 
 **Start + Select.** The chord opens the menu without the game seeing half of it: the
 frontend keeps the state from before each of the last ten real frames with the pad that
@@ -194,6 +195,21 @@ first one did (dropping any rewind records made in between). A press held for te
 or more counts as deliberate and is not undone; hardcore mode never rolls back. Buttons
 held when the game resumes from the menu are masked until released, so the Start or A
 that closed the menu does not reach the game.
+
+**LT + RT (Android, Steam Deck).** Both triggers together open the menu and close it
+again. The triggers are no NES buttons, so nothing is rolled back; a hotkey on a trigger
+(fast-forward on RT by default) acts only after that trigger has been held alone for six
+frames, so pulling both never fast-forwards first, and after the chord the triggers act on
+nothing until both are released (`--trigger-test`). On Android, L2 / R2 that are plain
+buttons (no analog trigger axes) are read from the joystick buttons SDL gives them.
+
+**Frame pacing.** Windows phase-locks to the monitor's vblank (DXGI `WaitForVBlank`) and
+presents just before it. Android locks every frame to the compositor's deadlines: a thread
+receives each vsync from the Choreographer, from Android 13 on with frame timelines (when a
+frame must be queued and when it is then on screen), and the loop queues each frame about
+2 ms before a deadline; the app asks for the highest display mode that is a multiple of
+60 Hz. Linux has no vblank source and paces by the timer without vsync. LATENCY.md has the
+measurements.
 
 **Shaders.** `draw_game_ex` composes the picture into a render target when a
 shader or an internal resolution is active: game frame (nearest / linear / sharp

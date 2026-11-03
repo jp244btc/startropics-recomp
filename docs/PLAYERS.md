@@ -12,8 +12,8 @@ Getting started
    the file onto the window, or start the program with the file as an argument.
 3. Go to Play > Start game. The chosen file is remembered in startropics.ini.
 
-Menu (Esc in game, or Start + Select together)
-----------------------------------------------
+Menu (Esc in game, Start + Select together, or LT + RT on Android and the Steam Deck)
+-------------------------------------------------------------------------------------
 Play          Start / resume, reset, save state, load state, the save state slot
               (1-9, with the date the slot was last saved), end game, quit
 Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
@@ -48,12 +48,15 @@ Default keys
 ------------
 D-pad: arrow keys    A (jump): X    B (attack): Z    Start: Enter    Select: Right Shift
 Rewind: hold Backspace (pad: RB)    Fast-forward: hold Tab (pad: RT, the right trigger)
-Gamepad: A = right face button (B on Xbox), B = bottom face button (A on Xbox),
-Start, Back = Select, D-pad or left stick. Start + Select pressed together opens
-the menu (also Guide or LB; on the keyboard Enter + Right Shift, or Esc). The game
-never sees that Start or Select: the program steps back to the moment before the
-first of the two went down (except in RetroAchievements hardcore mode). Buttons
-still held when you leave the menu reach the game only after you let go of them.
+Gamepad: NES A = the A button, NES B = X (the button left of A, as on the NES
+pad), Start, Back = Select, D-pad or left stick. A startropics.ini from an older
+version that still has the earlier default (A on B, B on A) moves to A / X once.
+Start + Select pressed together opens the menu (also Guide or LB; on Android and
+the Steam Deck also LT + RT together, which closes it again too; on the keyboard
+Enter + Right Shift, or Esc). The game never sees that Start or Select: the
+program steps back to the moment before the first of the two went down (except
+in RetroAchievements hardcore mode). Buttons still held when you leave the menu
+reach the game only after you let go of them.
 Keys and pad buttons can be rebound on the Controls tab: select a row, press
 Enter, then press the new key or pad button. "Reset to defaults" restores them.
 
@@ -67,11 +70,11 @@ There are nine save state slots per ROM. F5 saves to the current slot, F8 loads
 it, F6 / F7 change the slot (a message in the corner shows the slot and when it
 was last saved); the Play tab shows the same. Hold the rewind key to go back
 through the last several minutes of play (two frames of history per frame shown);
-release it to continue from there. Went back too far? Hold fast-forward: right
-after a rewind it goes forward again through the stretch you rewound, at the same
-speed, and stops where the rewind began. Anywhere else fast-forward speeds the
-game up (8x). As soon as you play on from an earlier moment, the stretch after it
-is gone. Rewind can be switched off in startropics.ini (rewind_enabled=0). Both are disabled in RetroAchievements hardcore mode.
+release it to continue from there. Went back too far? Hold fast-forward within
+1.5 s of letting go of rewind: it goes forward again through the stretch you
+rewound, at the same speed, and stops where the rewind began. Anywhere else
+fast-forward speeds the game up (8x). Once you have played on for 1.5 s from an
+earlier moment, the stretch after it is gone. Rewind can be switched off in startropics.ini (rewind_enabled=0). Both are disabled in RetroAchievements hardcore mode.
 
 Shaders
 -------

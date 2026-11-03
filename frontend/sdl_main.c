@@ -19,6 +19,7 @@
 #include <direct.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 #include <SDL.h>
 #include <stdio.h>
@@ -305,6 +306,7 @@ static void choose_data_dir(void) {
 #define FIXED_FULLSCREEN 0
 #endif
 static int deck_mode;          /* a Steam Deck (or the Deck edition): pad-first hints and Deck defaults */
+static int handheld;           /* Android or a Steam Deck: pad-first hints, LT + RT opens the menu */
 
 /* the DECK_EDITION build, or a Linux build that finds itself on a Steam Deck */
 static int on_steam_deck(void) {
@@ -365,6 +367,7 @@ static void write_config(void) {
     for (int i = 0; i < K_TOTAL; i++) fprintf(f, "%s=%s\n", key_names[i], SDL_GetKeyName((SDL_Keycode)cfg.key[i]));
     fputs("; gamepad buttons: A B X Y Back Start LB RB LS RS D-pad Up/Down/Left/Right, or none (left stick is always the d-pad)\n", f);
     for (int i = 0; i < K_TOTAL; i++) fprintf(f, "pad_%s=%s\n", key_names[i], input_pad_name(cfg.pad[i]));
+    fputs("pad_layout=2           ; pad defaults NES A on A, NES B on X (older files had A on B, B on A)\n", f);
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen, 2 fullscreen exclusive\n", cfg.display_mode);
     if (cfg.res_w > 0) fprintf(f, "resolution=%dx%d  ; auto (window size), or WxH: the window size, the display mode in exclusive fullscreen, or the render size in fullscreen\n", cfg.res_w, cfg.res_h);
@@ -376,14 +379,15 @@ static void write_config(void) {
     fprintf(f, "shader_strength=%d     ; 0 light, 1 medium, 2 strong\n", cfg.shader_strength);
     fprintf(f, "overscan=%d            ; crop 8 lines at the top and bottom\n", cfg.overscan);
     fprintf(f, "no_sprite_limit=%d     ; 1: draw every sprite on a line instead of 8 (no flicker)\n", cfg.no_sprite_limit);
-    fprintf(f, "low_latency=%d         ; pace on the display's vblank with frame delay (60/120 Hz displays)\n", cfg.lowlat);
+    fprintf(f, "low_latency=%d         ; 1: frame delay, locked to the display (Windows, Android) or timer pacing without vsync (Linux); 0: plain timer (Linux: vsync)\n", cfg.lowlat);
     fprintf(f, "runahead=%d            ; frames of run-ahead (0-3); StarTropics reacts 2 frames after a press\n", cfg.runahead);
     fprintf(f, "audio_latency=%d       ; 0 low (~25 ms), 1 normal (~45 ms), 2 safe (~90 ms)\n", cfg.audio_latency);
     fprintf(f, "volume=%d\n", cfg.volume);
     fprintf(f, "rewind_enabled=%d      ; keep a rewind history; hold the rewind key (above) to go back\n", cfg.rewind);
     fprintf(f, "state_slot=%d          ; save state slot 1-9 (F6 / F7 in game)\n", cfg.state_slot);
     fprintf(f, "ra_hardcore=%d         ; RetroAchievements hardcore mode: no state loads, no rewind\n", cfg.ra_hardcore);
-    fputs(";\n; Fixed keys: Esc or Start + Select together = menu, P = pause, F5 = save state,\n"
+    fputs(";\n; Fixed keys: Esc or Start + Select together = menu (also LT + RT on Android and the Steam Deck),\n"
+          ";             P = pause, F5 = save state,\n"
           ";             F8 = load state, F6 / F7 = slot,\n"
           ";             F11 or Alt+Enter = fullscreen, F12 = screenshot, Ctrl+R = reset\n", f);
     fclose(f);
@@ -393,6 +397,7 @@ static void load_config(void) {
     input_default_pads(cfg.pad);
     FILE *f = nes_fopen(ini_path, "r");
     if (!f) return;
+    int pad_layout = 1;
     char line[2400];
     while (fgets(line, sizeof line, f)) {
         char *eq = strchr(line, '=');
@@ -441,8 +446,14 @@ static void load_config(void) {
         else if (!strcmp(key, "audio_latency")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.audio_latency = v; }
         else if (!strcmp(key, "volume")) { int v = atoi(val); if (v >= 0 && v <= 100) cfg.volume = v; }
         else if (!strcmp(key, "scale")) { int v = atoi(val); if (v >= 1 && v <= 6) cfg.window_size = v; }
+        else if (!strcmp(key, "pad_layout")) pad_layout = atoi(val);
     }
     fclose(f);
+    /* settings from before NES A / B moved to the pad's A / X: the old default pair follows them */
+    if (pad_layout < 2 && cfg.pad[0] == SDL_CONTROLLER_BUTTON_B && cfg.pad[1] == SDL_CONTROLLER_BUTTON_A) {
+        cfg.pad[0] = SDL_CONTROLLER_BUTTON_A;
+        cfg.pad[1] = SDL_CONTROLLER_BUTTON_X;
+    }
     window_size_idx = cfg.window_size - 1;
 }
 
@@ -830,18 +841,34 @@ static void setup_sync(void) {
     SDL_DisplayMode m;
     refresh_hz = 0;
     if (SDL_GetWindowDisplayMode(window, &m) == 0 && m.refresh_rate > 0) refresh_hz = m.refresh_rate;
-    pace_mode = 0; vsync_div = 1;
-    if (cfg.lowlat && refresh_hz > 0) {
-        int div = (int)(refresh_hz / 60.0 + 0.5);
-        if (div < 1) div = 1;
-        double per = refresh_hz / div;
-        if (fabs(per - NES_FPS) / NES_FPS < 0.025) {
-            vsync_div = div;
-            if (gpu_sync_vblank_init(window)) pace_mode = 1;
-            else if (SDL_RenderSetVSync(renderer, 1) == 0) pace_mode = 2;
-        }
+#ifdef __ANDROID__
+    {   /* the Choreographer's measured refresh: SDL's figure is from startup and misses mode switches */
+        double d, per, lead;
+        if (gpu_sync_vblank_init(window) && gpu_sync_deadline(&d, &per, &lead) && per > 0)
+            refresh_hz = (double)SDL_GetPerformanceFrequency() / per;
     }
+#endif
+    pace_mode = 0; vsync_div = 1;
+    int div = refresh_hz > 0 ? (int)(refresh_hz / 60.0 + 0.5) : 1;
+    if (div < 1) div = 1;
+    int multiple = refresh_hz > 0 && fabs(refresh_hz / div - NES_FPS) / NES_FPS < 0.025;
+#if defined(_WIN32) || defined(__ANDROID__)
+    if (cfg.lowlat && multiple) {
+        vsync_div = div;
+        if (gpu_sync_vblank_init(window)) pace_mode = 1;
+        else if (SDL_RenderSetVSync(renderer, 1) == 0) pace_mode = 2;
+    }
+#else
+    /* Linux and the Steam Deck have no vblank source to lock to, and a vsynced Present can leave
+       a frame waiting in the queue (the NES runs a little faster than a 60 Hz panel). Low-latency
+       sync therefore paces by the timer without vsync, as Mesen does by default: the compositor
+       (the Deck's gamescope, a desktop's) shows the newest frame at each refresh. Switched off,
+       frames are presented with vsync, the smoothest motion at up to a frame more latency. */
+    if (!cfg.lowlat && multiple && SDL_RenderSetVSync(renderer, 1) == 0) { vsync_div = div; pace_mode = 2; }
+#endif
     if (pace_mode != 2) SDL_RenderSetVSync(renderer, 0);
+    static const char *const names[] = { "timer", "vblank phase-lock", "vsynced present" };
+    printf("pacing: %s, display %.0f Hz, %d vblank(s) per frame\n", names[pace_mode], refresh_hz, vsync_div);
 }
 
 /* the window's client size: the chosen resolution, else the game picture at the window-size multiple */
@@ -1030,6 +1057,64 @@ static int chord_rollback(void *scratch) {
     apu_flush_samples();
     chord_clear();
     return k;
+}
+
+/* ------------------------------------------------------------------ */
+/* LT + RT: the menu on handhelds                                      */
+/* ------------------------------------------------------------------ */
+/* On Android and the Steam Deck, pulling both triggers together opens the menu, and in the menu
+   closes it again. The triggers are no NES buttons, so the game has nothing to undo. What needs
+   care is a hotkey on a trigger (fast-forward on RT by default): it acts only once its trigger has
+   been held alone for TRIG_GRACE frames, so that pulling both never fast-forwards first, and after
+   the chord the triggers act on nothing until both are released. */
+#define TRIG_GRACE 6                 /* frames (100 ms) within which the second trigger counts as together */
+static int trig_override = -1;       /* tests: the trigger bits to use instead of the controllers */
+static int trig_now;                 /* triggers held: 1 LT, 2 RT */
+static int trig_alone;               /* frames the one trigger now held has been held alone */
+static int trig_latched;             /* the chord fired, or a binding was made: wait until both are released */
+
+/* once per real frame: 1 when both triggers are down and one of them was just pulled */
+static int trig_update(void) {
+    if (!handheld) { trig_now = 0; return 0; }
+    int t = trig_override >= 0 ? (trig_override & 3)
+          : (input_held(SDLK_UNKNOWN, INPUT_PAD_LT) ? 1 : 0) | (input_held(SDLK_UNKNOWN, INPUT_PAD_RT) ? 2 : 0);
+    int hit = t == 3 && trig_now != 3 && !trig_latched;
+    if (t == 1 || t == 2) trig_alone = (t == trig_now) ? trig_alone + 1 : 1;
+    else trig_alone = 0;
+    trig_now = t;
+    if (hit) trig_latched = 1;
+    if (t == 0) trig_latched = 0;
+    return hit;
+}
+
+/* a hotkey (rewind, fast-forward) held; on a trigger of the chord see above */
+static int hotkey_held(int k) {
+    int pad = cfg.pad[k];
+    if (handheld && (pad == INPUT_PAD_LT || pad == INPUT_PAD_RT)) {
+        if (input_held(cfg.key[k], -1)) return 1;    /* its keyboard key */
+        int bit = pad == INPUT_PAD_LT ? 1 : 2;
+        return !trig_latched && trig_now == bit && trig_alone >= TRIG_GRACE;
+    }
+    return input_held(cfg.key[k], pad);
+}
+
+/* ------------------------------------------------------------------ */
+/* the rewind history after a rewind                                   */
+/* ------------------------------------------------------------------ */
+/* After a rewind the new frames are not recorded for REDO_WINDOW frames, as long as there is a
+   rewound stretch: fast-forward pressed in that time still goes forward through it, to where the
+   rewind began. The first record after that replaces the stretch. */
+#define REDO_WINDOW 90               /* frames (1.5 s) */
+static int redo_hold;
+
+/* the game loop's history step after each emulated frame: a record every other frame.
+   Returns 1 if a record was made. */
+static int history_step(int frame, void *scratch, size_t size) {
+    if (redo_hold > 0) redo_hold--;
+    if ((frame & 1) || (redo_hold > 0 && rewind_redo_count() > 0)) return 0;
+    nes_state_save(scratch, size);
+    rewind_push(scratch);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1247,8 +1332,10 @@ static void refresh_play_items(void) {
     char when[40];
     if (!rom_ok) snprintf(play_items[5].info, sizeof play_items[5].info, "Save states need a loaded ROM.");
     else if (slot_saved_at(cfg.state_slot, when, sizeof when))
-        snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: saved %s.   In game F6 / F7 change the slot.", cfg.state_slot, when);
-    else snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: empty.   In game F6 / F7 change the slot.", cfg.state_slot);
+        snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: saved %s.%s", cfg.state_slot, when,
+                 handheld ? "" : "   In game F6 / F7 change the slot.");
+    else snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: empty.%s", cfg.state_slot,
+                  handheld ? "" : "   In game F6 / F7 change the slot.");
 }
 
 /* the Graphics rows shown: all of them, minus Window size while a resolution is set (it is unused then) */
@@ -1360,8 +1447,8 @@ static void build_menu(void) {
     ui_item *p = play_items;
     p[0] = (ui_item){ "Start game", UI_ACTION, ACT_PLAY, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     p[1] = (ui_item){ "Reset game", UI_ACTION, ACT_RESET, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
-    p[2] = (ui_item){ "Save state  (F5)", UI_ACTION, ACT_SAVE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
-    p[3] = (ui_item){ "Load state  (F8)", UI_ACTION, ACT_LOAD, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[2] = (ui_item){ handheld ? "Save state" : "Save state  (F5)", UI_ACTION, ACT_SAVE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    p[3] = (ui_item){ handheld ? "Load state" : "Load state  (F8)", UI_ACTION, ACT_LOAD, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     p[4] = (ui_item){ "Save state slot", UI_INT, SLOT_CHANGED, &cfg.state_slot, NULL, 0, 1, 9, 1, "", "", NULL };
     p[5] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     p[6] = (ui_item){ "End game", UI_ACTION, ACT_STOP, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
@@ -1395,8 +1482,12 @@ static void build_menu(void) {
     ctl_items[K_TOTAL] = (ui_item){ "Reset to defaults", UI_ACTION, ACT_KEYS_DEFAULT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-        "Menu: Start + Select together, Esc, Guide or LB. Fast-forward right after a rewind goes forward again to where it began. "
+        "Menu: Start + Select together, Esc, Guide or LB. Fast-forward within 1.5 s after a rewind goes forward again to where it began. "
         "P pause, F5 / F8 save / load, F6 / F7 slot, F11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
+    if (handheld)
+        snprintf(ctl_items[K_TOTAL + 2].info, sizeof ctl_items[K_TOTAL + 2].info, "%s",
+                 "Menu: LT + RT together (also Start + Select, LB or Guide). "
+                 "Fast-forward within 1.5 s after a rewind goes forward again to where it began.");
     refresh_controls_info();
 
     ui_item *r = ra_items;
@@ -1430,7 +1521,7 @@ static void build_menu(void) {
     menu.tabs = tabs; menu.ntabs = N_TABS;
     menu.title = "STARTROPICS";
     menu.subtitle = "native port";
-    if (FIXED_FULLSCREEN || deck_mode) menu.hint = "D-pad, A to choose, B back.   In game: Start + Select opens this menu";
+    if (handheld) menu.hint = "D-pad, A to choose, B back.   In game: LT + RT opens this menu";
     else menu.hint = "Arrows / Enter / Esc to navigate   Drop a .nes file here to load it";
     menu.hover_tab = menu.hover_item = -1;
     refresh_rom_items();
@@ -1642,10 +1733,73 @@ static int chord_selftest(void) {
     return failures ? 1 : 0;
 }
 
+/* --trigger-test: LT + RT and the fast-forward hotkey on RT, through the same functions as the game loop */
+static int trigger_test_flag;
+static int trig_step(int bits, int *ff) {
+    trig_override = bits;
+    int hit = trig_update();
+    *ff = hotkey_held(K_FFWD);
+    return hit;
+}
+
+static int trigger_selftest(void) {
+    int failures = 0, ff = 0, hits = 0, ffs = 0;
+    int saved_handheld = handheld, saved_pad = cfg.pad[K_FFWD];
+    handheld = 1;
+    cfg.pad[K_FFWD] = INPUT_PAD_RT;
+#define TCHECK(c, msg) do { if (c) printf("  ok   %s\n", msg); else { printf("  FAIL %s\n", msg); failures++; } } while (0)
+#define TRESET() do { trig_now = trig_alone = trig_latched = 0; } while (0)
+
+    TRESET(); hits = ffs = 0;
+    for (int i = 0; i < 3; i++) { hits += trig_step(2, &ff); ffs += ff; }
+    hits += trig_step(3, &ff); ffs += ff;
+    TCHECK(hits == 1 && ffs == 0, "RT, then LT 3 frames later: the menu opens and fast-forward never starts");
+    hits = ffs = 0;
+    for (int i = 0; i < 10; i++) { hits += trig_step(3, &ff); ffs += ff; }
+    for (int i = 0; i < 20; i++) { hits += trig_step(2, &ff); ffs += ff; }
+    TCHECK(hits == 0 && ffs == 0, "after the chord: no second menu and no fast-forward until both are released");
+    hits = ffs = 0;
+    trig_step(0, &ff);
+    for (int i = 0; i < 20; i++) { hits += trig_step(2, &ff); ffs += ff; }
+    TCHECK(hits == 0 && ffs == 20 - TRIG_GRACE + 1, "released, then RT held: fast-forward from the sixth frame on");
+    hits = trig_step(3, &ff);
+    TCHECK(hits == 1 && !ff, "fast-forwarding, then LT: the menu opens and fast-forward stops");
+    TRESET(); trig_step(0, &ff);
+    hits = trig_step(3, &ff);
+    TCHECK(hits == 1, "both triggers on the same frame: the menu opens");
+    hits = 0;
+    for (int i = 0; i < 30; i++) hits += trig_step(3, &ff);
+    TCHECK(hits == 0, "both held: the menu opens once");
+    TRESET(); hits = ffs = 0;
+    for (int i = 0; i < 30; i++) { hits += trig_step(1, &ff); ffs += ff; }
+    TCHECK(hits == 0 && ffs == 0, "LT held alone: nothing happens (fast-forward is on RT)");
+    hits = trig_step(3, &ff);
+    TCHECK(hits == 1, "LT held, then RT: the menu opens");
+    TRESET(); trig_step(0, &ff);
+    trig_latched = 1;   /* a binding was just made with a key: the same frame's update sees no trigger */
+    trig_step(0, &ff);
+    hits = trig_step(3, &ff);
+    TCHECK(hits == 1, "a binding made without the triggers: the chord works right after");
+    TRESET(); trig_step(2, &ff);
+    trig_latched = 1;   /* RT was just bound in the menu and is still held */
+    trig_step(2, &ff);
+    hits = trig_step(3, &ff);
+    TCHECK(hits == 0, "a binding made with RT: pulling LT next opens nothing");
+    handheld = 0; TRESET();
+    hits = trig_step(0, &ff) + trig_step(3, &ff);
+    TCHECK(hits == 0, "desktop builds: LT + RT is no chord");
+
+    handheld = saved_handheld; cfg.pad[K_FFWD] = saved_pad; trig_override = -1; TRESET();
+#undef TCHECK
+#undef TRESET
+    printf("trigger-test: %s (%d failure%s)\n", failures ? "FAILED" : "all passed", failures, failures == 1 ? "" : "s");
+    return failures ? 1 : 0;
+}
+
 static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
            "                   [--game-shot out.png [frames]] [--rewind-test N] [--list-controllers [out.txt]]\n"
-           "                   [--list-modes [out.txt]] [--chord-test] [--stats out.txt]\n");
+           "                   [--list-modes [out.txt]] [--chord-test] [--trigger-test] [--stats out.txt]\n");
 }
 
 static uint64_t fb_hash(void) {
@@ -1683,6 +1837,16 @@ static int rewind_selftest(int frames) {
         if (fb_hash() != hashes[f - 1]) { printf("rewind-test: frame %d differs after rewinding\n", f - 1); ok = 0; break; }
         steps++;
     }
+    /* the player goes on for a second right after the rewind: inside the undo window nothing
+       is recorded, so fast-forward can still go forward through the whole rewound stretch */
+    if (ok) {
+        void *live = malloc(sz);
+        redo_hold = REDO_WINDOW;
+        int pushed = 0;
+        for (int i = 1; i <= 60; i++) { nes_set_pad(0, 0x80); nes_run_frame(); pushed += history_step(i, live, sz); }
+        free(live);
+        if (pushed) { printf("rewind-test: %d records made inside the undo window\n", pushed); ok = 0; }
+    }
     /* forward again (fast-forward after a rewind): every redone state must give the frames of the first run,
        and the last one must be the state the rewind started from */
     int fwd = 0;
@@ -1701,6 +1865,15 @@ static int rewind_selftest(int frames) {
             fwd++;
         }
         if (ok && (rewind_redo(st) || rewind_redo_count() != 0)) { printf("rewind-test: forward went past the newest state\n"); ok = 0; }
+    }
+    /* two steps back, then playing on past the window: the history records again and the stretch is gone */
+    if (ok) {
+        rewind_pop(st); rewind_pop(st);
+        nes_state_load(st, sz);
+        redo_hold = REDO_WINDOW;
+        int first = 0;
+        for (int i = 1; i <= REDO_WINDOW + 4 && !first; i++) { nes_run_frame(); if (history_step(i, st, sz)) first = i; }
+        if (first < REDO_WINDOW || rewind_redo_count() != 0) { printf("rewind-test: the undo window ended at frame %d, expected %d\n", first, REDO_WINDOW); ok = 0; }
     }
     #undef TEST_PAD
     printf("rewind-test: %d frames forward, %d steps back, %d steps forward again: %s; history %zu bytes (%.0f bytes per record)\n",
@@ -1731,6 +1904,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--rewind-test") && i + 1 < argc) rewind_test = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chord-test")) chord_test = 1;
+        else if (!strcmp(argv[i], "--trigger-test")) trigger_test_flag = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (!strcmp(argv[i], "--list-controllers")) { list_pads = 1; if (i + 1 < argc) list_pads_file = argv[++i]; }
         else if (!strcmp(argv[i], "--list-modes")) { list_modes_flag = 1; if (i + 1 < argc) list_modes_file = argv[++i]; }
@@ -1769,11 +1943,17 @@ int main(int argc, char **argv) {
         const char *ext = SDL_AndroidGetExternalStoragePath();
         char logp[1200];
         snprintf(logp, sizeof logp, "%s/startropics-log.txt", ext ? ext : data_dir);
-        if (freopen(logp, "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
-        if (freopen(logp, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+        /* one open file for both: two opens would each keep their own write position and
+           overwrite each other's lines */
+        if (freopen(logp, "w", stdout)) {
+            setvbuf(stdout, NULL, _IOLBF, 0);
+            dup2(fileno(stdout), fileno(stderr));
+            setvbuf(stderr, NULL, _IONBF, 0);
+        }
     }
 #endif
     deck_mode = on_steam_deck();
+    handheld = FIXED_FULLSCREEN || deck_mode;
     snprintf(ini_path, sizeof ini_path, "%sstartropics.ini", data_dir);
     int first_run = !file_exists(ini_path);
     load_config();
@@ -1856,6 +2036,11 @@ int main(int argc, char **argv) {
     ui_select_first(&menu);
 
     /* ---- self tests ---- */
+    if (trigger_test_flag) {
+        int rc = trigger_selftest();
+        font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
+        return rc;
+    }
     if (chord_test) {
         if (!rom_ok) { fprintf(stderr, "chord-test: no valid ROM (%s)\n", rom_status); SDL_Quit(); return 1; }
         int rc = chord_selftest();
@@ -1968,7 +2153,7 @@ int main(int argc, char **argv) {
         int in_game = (state == ST_GAME && !paused);
         /* fast-forward: a press while a rewound stretch can still be undone goes forward through
            it (until released); otherwise it speeds the game up */
-        int ff_held = in_game && input_held(cfg.key[K_FFWD], cfg.pad[K_FFWD]);
+        int ff_held = in_game && hotkey_held(K_FFWD);
         if (!ff_held) ff_redo = 0;
         else if (!ff_was_held && cfg.rewind && !ach_hardcore() && rewind_redo_count() > 0) ff_redo = 1;
         ff_was_held = ff_held;
@@ -2018,7 +2203,9 @@ int main(int argc, char **argv) {
             if (state == ST_MENU) {
                 if (ev.type == SDL_KEYDOWN && !menu.capture && ev.key.keysym.sym == SDLK_F11) { toggle_fullscreen(); continue; }
                 if (ev.type == SDL_KEYDOWN && !menu.capture && ev.key.keysym.sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT)) { toggle_fullscreen(); continue; }
+                int capturing = menu.capture;
                 menu_action(ui_handle_event(&menu, &ev));
+                if (capturing && !menu.capture) trig_latched = 1;   /* a binding was just made, maybe on a trigger */
                 continue;
             }
             /* in game */
@@ -2043,6 +2230,11 @@ int main(int argc, char **argv) {
             }
         }
         if (!running) break;
+        int trig_hit = trig_update();
+        if (trig_hit && state == ST_MENU && !menu.capture) {
+            menu_action((ui_event){ UI_EV_BACK, 0 });   /* LT + RT again: back to the game */
+            trig_hit = 0;
+        }
         in_game = (state == ST_GAME && !paused);
         ach_pump();
         if (rom_ok && ach_take_reset_request()) { nes_reset(); ach_reset(); rewind_clear(); chord_clear(); osd("Game reset for hardcore mode"); }
@@ -2052,11 +2244,15 @@ int main(int argc, char **argv) {
             if (rom_ok && !game_started) { nes_set_pad(0, 0); nes_run_frame(); audio_out_pump(0, cfg.volume); }
             draw_menu();
         } else if (paused) {
-            if (chord_pressed(game_pad())) { paused = 0; open_menu(); draw_menu(); }
+            if (chord_pressed(game_pad()) || trig_hit) { paused = 0; open_menu(); draw_menu(); }
             else { draw_game(); draw_overlays(1); }
-        } else if (cfg.rewind && !fast && !ach_hardcore() && input_held(cfg.key[K_REWIND], cfg.pad[K_REWIND])) {
+        } else if (trig_hit) {
+            open_menu();   /* LT + RT (handhelds) */
+            draw_menu();
+        } else if (cfg.rewind && !fast && !ach_hardcore() && hotkey_held(K_REWIND)) {
             /* rewind: step back through the history, running one frame of each earlier state
                for its picture and sound (two frames of history per shown frame) */
+            redo_hold = REDO_WINDOW;
             if (rewind_pop(rw_state)) {
                 nes_state_load(rw_state, rw_size);
                 apu_flush_samples();
@@ -2100,7 +2296,7 @@ int main(int argc, char **argv) {
                 ach_frame();
                 audio_out_pump(fast, cfg.volume);
                 if (++frames % 60 == 0) battery_check(0);
-                if (cfg.rewind && !ach_hardcore() && (frames & 1) == 0) { nes_state_save(rw_state, rw_size); rewind_push(rw_state); chord_mark_pushed(); }
+                if (cfg.rewind && !ach_hardcore() && history_step(frames, rw_state, rw_size)) chord_mark_pushed();
             }
             if (chord) {
                 /* Start + Select: the menu, from the moment before the first of the two went down */
@@ -2133,14 +2329,29 @@ int main(int argc, char **argv) {
         SDL_RenderPresent(renderer);
         Uint64 t2 = SDL_GetPerformanceCounter();
 
-        /* adapt the frame delay to the measured work time; widen the margin after a missed deadline */
-        double work = (double)(t1 - t0);
+        /* adapt the frame delay to the measured work time; widen the margin after a missed deadline.
+           The frame is handed over when the drawing ends, except on Android, where Present
+           (eglSwapBuffers) is what queues it for the compositor */
+#ifdef __ANDROID__
+        const Uint64 t_done = pace_mode == 1 ? t2 : t1;
+#else
+        const Uint64 t_done = t1;
+#endif
+        double work = (double)(t_done - t0);
         work_est = (work > work_est) ? work : work_est * 0.995 + work * 0.005;
         if (!fast) {
-            if ((double)t1 > deadline) { missed++; margin += 0.5 / tick_ms; if (margin > 6.0 / tick_ms) margin = 6.0 / tick_ms; }
+            if ((double)t_done > deadline) { missed++; margin += 0.5 / tick_ms; if (margin > 6.0 / tick_ms) margin = 6.0 / tick_ms; }
             else if (margin > 2.0 / tick_ms) margin -= 0.01 / tick_ms;
             if ((double)t2 > next + 4 * period) next = (double)t2 + period;   /* fell far behind: resync */
-            if (pace_mode == 1) {
+            double vs_deadline, vs_period, vs_lead;
+            if (pace_mode == 1 && gpu_sync_deadline(&vs_deadline, &vs_period, &vs_lead)) {
+                /* Android: lock the next target to the compositor's own deadline grid, one game
+                   frame (vsync_div refreshes) after this one; a changed refresh re-plans the pacing */
+                if (fabs(vs_period - vblank) > vblank * 0.03) setup_sync();
+                vblank = vs_period;
+                double target = deadline + vblank * vsync_div;
+                grid = vs_deadline + floor((target - vs_deadline) / vblank + 0.5) * vblank;
+            } else if (pace_mode == 1) {
                 /* re-anchor the vblank grid: Present returning late means it waited for the vblank
                    (one-frame queue), otherwise ask the display directly every couple of seconds */
                 double anchor = 0;
@@ -2176,10 +2387,14 @@ int main(int argc, char **argv) {
             stats_work += work * tick_ms;
             if (++stats_frames >= 60) {
                 double ms = (double)(t2 - stats_t0) * tick_ms / stats_frames;
+                char lead_txt[48] = "";
+                double sd, sp, sl;
+                if (pace_mode == 1 && gpu_sync_deadline(&sd, &sp, &sl) && sl > 0)
+                    snprintf(lead_txt, sizeof lead_txt, "  deadline->screen %.2f ms", sl * tick_ms);
                 fprintf(stats_file, "%s: frame %.3f ms (%.2f fps)  input->present %.2f ms  work %.2f ms  margin %.1f ms  "
-                        "vblank %.3f ms  audio queued %d ms  apu rate %d  missed deadlines %d\n",
+                        "vblank %.3f ms  audio queued %d ms  apu rate %d  missed deadlines %d%s\n",
                         pace_names[pace_mode], ms, 1000.0 / ms, stats_lat / stats_frames, stats_work / stats_frames,
-                        margin * tick_ms, vblank * tick_ms, audio_out_queued_ms(), audio_out_rate(), missed);
+                        margin * tick_ms, vblank * tick_ms, audio_out_queued_ms(), audio_out_rate(), missed, lead_txt);
                 fflush(stats_file);
                 stats_t0 = t2; stats_frames = 0; stats_lat = stats_work = 0;
             }

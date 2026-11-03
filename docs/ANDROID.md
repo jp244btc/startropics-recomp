@@ -24,11 +24,12 @@ changed on the Graphics tab.
 
 Controls
 --------
-The built-in controller works as a gamepad. Default buttons (Xbox positions; on a Nintendo-
-style layout such as the Retroid's, swap them on the Controls tab if they feel reversed):
-right face button = NES A (jump), bottom face button = NES B (attack), Start, Select.
-Start + Select together, or the Android back button, opens the menu. R1 (hold) rewinds,
-R2 (hold) fast-forwards; right after a rewind it goes forward again to where it began.
+The built-in controller works as a gamepad. Default buttons (Xbox labels; on a Nintendo-
+style layout such as the Retroid's, change them on the Controls tab if they feel wrong):
+A = NES A (jump), X = NES B (attack), Start, Select. LT + RT (L2 + R2) together opens the
+menu and closes it again; Start + Select together and the Android back button open it
+too. R1 (hold) rewinds, R2 (hold) fast-forwards; within 1.5 s after a rewind it goes
+forward again to where the rewind began.
 
 Notes
 -----
@@ -38,4 +39,9 @@ Notes
   appears for the user name and password). Only the session token is stored.
 - A log of the last run is written to Android/data/org.startropics.nativeport/files/
   startropics-log.txt (handy with `adb pull` when something goes wrong).
+- Smooth motion and latency: on a 120 Hz screen (Pocket EVO) the display runs at 120 Hz
+  while the app is in front, and every frame is shown for exactly two refreshes, locked
+  to the compositor's deadlines (Android 13 and newer report them). A press reaches the
+  middle of the screen in about 31 ms on average, against about 50 ms on a NES with a
+  CRT; docs/LATENCY.md in the source has the breakdown.
 - Building the APK yourself: see the README (android/build_apk.py).

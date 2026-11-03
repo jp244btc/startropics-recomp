@@ -18,6 +18,7 @@ static const struct { int target_ms, max_ms, prime_ms, device_samples; } presets
 
 static SDL_AudioDeviceID dev;
 static int base_rate, cur_rate, preset;
+static double trim;          /* learned rate correction (integral term) */
 
 static int open_device(void) {
     SDL_AudioSpec want, have;
@@ -70,7 +71,12 @@ void audio_out_pump(int muted, int volume) {
         double err = (double)(target - audio_out_queued_ms()) / target;   /* +1 empty .. -1 at twice the target */
         if (err > 1.0) err = 1.0;
         if (err < -1.0) err = -1.0;
-        cur_rate = (int)(base_rate * (1.0 + 0.012 * err) + 0.5);
+        /* a slow integral term learns a steady clock difference (a 120.6 Hz display paces the
+           game 0.35 % fast), so the queue settles at the target instead of above it */
+        trim += 0.000024 * err;
+        if (trim > 0.01) trim = 0.01;
+        if (trim < -0.01) trim = -0.01;
+        cur_rate = (int)(base_rate * (1.0 + 0.012 * err + trim) + 0.5);
     } else {
         cur_rate = base_rate;
     }

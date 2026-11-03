@@ -431,6 +431,23 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
         }
         break;
     case SDL_JOYBUTTONDOWN:          /* generic joystick fallback: 0 = confirm, 1 = back, 7 = start */
+#ifdef __ANDROID__
+        if (m->capture == UI_CAPTURE_KEY && (e->jbutton.button == 15 || e->jbutton.button == 16)) {
+            /* L2 / R2 that are plain buttons (see input.c) bind as LT / RT */
+            SDL_GameController *gc = SDL_GameControllerFromInstanceID(e->jbutton.which);
+            SDL_GameControllerAxis ax = e->jbutton.button == 15 ? SDL_CONTROLLER_AXIS_TRIGGERLEFT : SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+            if (gc && !SDL_GameControllerHasAxis(gc, ax)) {
+                ui_tab *t = &m->tabs[m->tab];
+                ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+                m->capture = UI_CAPTURE_NONE;
+                if (it && it->kind == UI_KEY && it->pad) {
+                    *it->pad = e->jbutton.button == 15 ? INPUT_PAD_LT : INPUT_PAD_RT;
+                    return ev(UI_EV_CHANGED, it->id);
+                }
+                return ev(UI_EV_NONE, 0);
+            }
+        }
+#endif
         if (SDL_GameControllerFromInstanceID(e->jbutton.which)) break;   /* already handled as a controller */
         if (e->jbutton.button == 0) return key_action(m, SDLK_RETURN);
         if (e->jbutton.button == 1) return key_action(m, SDLK_ESCAPE);

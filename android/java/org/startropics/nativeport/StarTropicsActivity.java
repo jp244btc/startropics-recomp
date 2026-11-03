@@ -3,17 +3,24 @@ package org.startropics.nativeport;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.view.Display;
+import android.view.WindowManager;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 
 import org.libsdl.app.SDLActivity;
 
@@ -23,6 +30,59 @@ import org.libsdl.app.SDLActivity;
  * RetroAchievements.
  */
 public class StarTropicsActivity extends SDLActivity {
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        preferNesRefreshRate();
+    }
+
+    /* The NES shows 60 frames a second. Ask for the display mode (at the current resolution) with
+       the highest refresh rate that is a whole multiple of 60 Hz, up to 240 Hz: 120 Hz on a
+       120 / 144 / 165 Hz panel. Every frame then stays on screen equally long, and a faster
+       refresh shortens the compositor's queue. It applies only while this app is in front. */
+    private void preferNesRefreshRate() {
+        if (Build.VERSION.SDK_INT < 23) return;
+        try {
+            Display d = getWindowManager().getDefaultDisplay();
+            Display.Mode cur = d.getMode();
+            Display.Mode best = null;
+            for (Display.Mode m : d.getSupportedModes()) {
+                if (m.getPhysicalWidth() != cur.getPhysicalWidth() || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+                float r = m.getRefreshRate();
+                int k = Math.round(r / 60.0f);
+                if (k < 1 || k > 4 || Math.abs(r - 60.0f * k) > 1.5f * k) continue;
+                if (best == null || r > best.getRefreshRate()) best = m;
+            }
+            if (best == null) return;
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.preferredDisplayModeId = best.getModeId();
+            getWindow().setAttributes(lp);
+        } catch (RuntimeException e) {
+            /* keep the system's choice */
+        }
+    }
+
+    /* Command-line options for tests and diagnostics (for example --stats and an absolute file
+       path, one per line) can be put in Android/data/org.startropics.nativeport/files/args.txt,
+       a folder only adb and the app itself can write to. */
+    @Override
+    protected String[] getArguments() {
+        File dir = getExternalFilesDir(null);
+        File f = dir != null ? new File(dir, "args.txt") : null;
+        if (f == null || !f.isFile()) return new String[0];
+        ArrayList<String> args = new ArrayList<>();
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (!line.isEmpty()) args.add(line);
+            }
+        } catch (IOException e) {
+            return new String[0];
+        }
+        return args.toArray(new String[0]);
+    }
     private static final int PICK_ROM = 0x5754;
 
     /** Called from native code: show the system document picker. */

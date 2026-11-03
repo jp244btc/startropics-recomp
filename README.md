@@ -49,8 +49,9 @@ does not fill the screen when it does not (integer multiples, or a 16:9 picture 
 16:10 screen). The window works in real pixels on high-DPI displays (per-monitor DPI
 aware), so a 1920x1080 preset is 1920x1080 pixels. Esc in game opens the same menu
 as a pause screen. XInput and other gamepads are handled through SDL's game
-controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
-Start + Select together, the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
+controller API (NES A on A, NES B on X, Start, Back = Select, D-pad or left stick;
+Start + Select together, the Guide button or LB opens the menu, and LT + RT on Android and
+the Steam Deck); pads SDL has no mapping for fall back to
 a generic joystick layout, and `startropics --list-controllers out.txt` writes
 what SDL detected.
 
@@ -173,8 +174,8 @@ Player notes for handhelds: `docs/ANDROID.md`.
 | NES | Keyboard | Gamepad (SDL) |
 |---|---|---|
 | D-pad | Arrow keys | D-pad / left stick |
-| A (jump) | X | B (right face button, like the NES layout) |
-| B (attack) | Z | A (bottom face button) |
+| A (jump) | X | A (bottom face button) |
+| B (attack) | Z | X (left face button: B sits left of A, as on the NES pad) |
 | Start | Enter | Start |
 | Select | Right Shift | Back |
 
@@ -193,10 +194,13 @@ deep, **run-ahead** (default 2 frames, the game's own reaction time) removes
 StarTropics' built-in input lag entirely, and audio sits at 25-45 ms with dynamic
 rate control. Exclusive fullscreen bypasses the desktop compositor. All of this is
 adjustable on the Graphics and Audio tabs, and `startropics --play --stats
-out.txt` logs the measured pacing once a second.
+out.txt` logs the measured pacing once a second. On Android each frame is locked to
+the compositor's own deadlines (Choreographer frame timelines) and the display runs at
+120 Hz where it can; on Linux and the Steam Deck frames go out without vsync, as in
+Mesen's default, so none waits in a queue. LATENCY.md compares the port with Mesen 2.
 
-Hotkeys: **Esc** or **Start + Select** together (pad or keyboard) menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
-**Tab** / pad RT (hold) fast-forward (right after a rewind it first goes forward again to where the rewind began), **P** pause, **F5** / **F8** save / load state,
+Hotkeys: **Esc** or **Start + Select** together (pad or keyboard) menu, **LT + RT** together on Android and the Steam Deck, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
+**Tab** / pad RT (hold) fast-forward (within 1.5 s after a rewind it first goes forward again to where the rewind began), **P** pause, **F5** / **F8** save / load state,
 **F6** / **F7** previous / next save state slot (nine per ROM), **Backspace** (hold;
 pad RB) rewind, **F12** screenshot (`screenshots/`), **Ctrl+R** reset. Keys and
 display settings are in the menu and in `startropics.ini` next to the executable.

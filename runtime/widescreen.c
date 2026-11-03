@@ -294,8 +294,8 @@ int widescreen_check(int *total_tiles, int *bad_pixels, int *total_pixels) {
     return bad;
 }
 
-int widescreen_visible_width(int lines, double pixel_aspect) {
-    int w = (int)(lines * 16.0 / 9.0 / pixel_aspect + 0.5);
+int widescreen_visible_width(int lines, double pixel_aspect, double ratio) {
+    int w = (int)(lines * ratio / pixel_aspect + 0.5);
     if (w > WS_W) w = WS_W;
     if (w < 256) w = 256;
     return w;

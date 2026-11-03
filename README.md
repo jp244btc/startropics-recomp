@@ -35,7 +35,7 @@ instead (no artwork is bundled: Nintendo's promotional art cannot be shipped).
 
 Options (all saved to `startropics.ini`): windowed / fullscreen, window size
 1x-6x, scaling (integer / fit window / stretch), aspect ratio (square pixels 8:7,
-4:3 CRT, 16:9 widescreen: below), filter (nearest / linear / sharp), overscan crop,
+4:3 CRT, 16:9 or 16:10 widescreen: below), filter (nearest / linear / sharp), overscan crop,
 volume, and rebinding of the eight NES buttons. Esc in game opens the same menu
 as a pause screen. XInput and other gamepads are handled through SDL's game
 controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
@@ -48,7 +48,7 @@ game logic (as the N64 recompilation releases do), while every asset still comes
 from the player's own ROM at run time. Building from source as described below
 keeps everything derived from the ROM on your own machine.
 
-**16:9 (widescreen)**, the third aspect ratio, is a real 16:9 view, not a stretch: a tile-based
+**16:9 (widescreen)** and **16:10 (widescreen)**, the third and fourth aspect ratios, are real widescreen views, not a stretch: a tile-based
 NES game has no picture beyond the 256-pixel edge, so the port decodes the
 overworld's map data from your ROM (the screen grid, the run-length coded
 metatile rows and the metatile table; `docs/MAP_FORMATS.md`) and draws the

@@ -17,7 +17,7 @@ Menu (Esc in game)
 Play      Start / resume, reset, save state, load state, quit
 Graphics  Display mode (windowed / fullscreen / fullscreen exclusive),
           window size 1x-6x, scaling (integer / fit window / stretch (distorts)),
-          aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 widescreen: the overworld
+          aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 or 16:10 widescreen: the overworld
           map is decoded beside the picture, other scenes get black bars, nothing
           is stretched),
           filter (nearest / linear / sharp), overscan crop,

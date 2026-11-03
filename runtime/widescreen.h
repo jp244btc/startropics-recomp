@@ -28,7 +28,8 @@ int widescreen_check(int *total_tiles, int *bad_pixels, int *total_pixels);
 
 /* Width of the decoded picture to show for a display of the given height
    (in NES lines) and pixel aspect ratio (1.0 = square pixels): the part of
-   the WS_W-wide frame that makes a 16:9 picture, at most WS_W. */
-int widescreen_visible_width(int lines, double pixel_aspect);
+   the WS_W-wide frame that makes a picture of the given ratio (16/9, 16/10),
+   at most WS_W and at least the normal 256. */
+int widescreen_visible_width(int lines, double pixel_aspect, double ratio);
 
 #endif

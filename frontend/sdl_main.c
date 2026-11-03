@@ -78,7 +78,7 @@ static const char *const runahead_names[] = { "Off", "1 frame", "2 frames", "3 f
 static const char *const latency_names[]  = { "Low", "Normal", "Safe" };
 static const char *const window_sizes[]  = { "1x", "2x", "3x", "4x", "5x", "6x" };
 static const char *const scalings[]      = { "Integer", "Fit window", "Stretch (distorts)" };
-static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (widescreen)" };
+static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (widescreen)", "16:10 (widescreen)" };
 static const char *const filters[]       = { "Nearest", "Linear", "Sharp" };
 static const char *const onoff[]         = { "Off", "On" };
 
@@ -187,7 +187,7 @@ static void write_config(void) {
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen\n", cfg.display_mode);
     fprintf(f, "scaling=%d             ; 0 integer, 1 fit window, 2 stretch (distorts)\n", cfg.scaling);
-    fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen (map decoded beside the picture, black bars elsewhere)\n", cfg.aspect);
+    fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen, 3 16:10 widescreen (map decoded beside the picture, black bars elsewhere)\n", cfg.aspect);
     fprintf(f, "filter=%d              ; 0 nearest, 1 linear, 2 sharp\n", cfg.filter);
     fprintf(f, "overscan=%d            ; crop 8 lines at the top and bottom\n", cfg.overscan);
     fprintf(f, "low_latency=%d         ; pace on the display's vblank with frame delay (60/120 Hz displays)\n", cfg.lowlat);
@@ -231,7 +231,7 @@ static void load_config(void) {
         else if (!strcmp(key, "window_size")) { int v = atoi(val); if (v >= 1 && v <= 6) cfg.window_size = v; }
         else if (!strcmp(key, "display_mode")) cfg.display_mode = atoi(val) ? 1 : 0;
         else if (!strcmp(key, "scaling")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.scaling = v; }
-        else if (!strcmp(key, "aspect")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.aspect = v; }
+        else if (!strcmp(key, "aspect")) { int v = atoi(val); if (v >= 0 && v <= 3) cfg.aspect = v; }
         else if (!strcmp(key, "filter")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.filter = v; }
         else if (!strcmp(key, "overscan")) cfg.overscan = atoi(val) ? 1 : 0;
         else if (!strcmp(key, "low_latency")) cfg.lowlat = atoi(val) ? 1 : 0;
@@ -247,14 +247,16 @@ static void load_config(void) {
 /* ------------------------------------------------------------------ */
 /* video                                                               */
 /* ------------------------------------------------------------------ */
-/* the 16:9 aspect choice is the widescreen mode: the map decoded beside the picture where
-   the scene format is known, the normal 4:3 picture between black bars elsewhere, never a stretch */
-static int widescreen_on(void) { return cfg.aspect == 2; }
+/* the 16:9 and 16:10 aspect choices are the widescreen modes: the map decoded beside the
+   picture where the scene format is known, the normal 4:3 picture between black bars
+   elsewhere, never a stretch */
+static int widescreen_on(void) { return cfg.aspect >= 2; }
 
 static double target_aspect(int src_h) {
     switch (cfg.aspect) {
     case 1: return 4.0 / 3.0;
     case 2: return 16.0 / 9.0;
+    case 3: return 16.0 / 10.0;
     default: return (double)FB_W / src_h;
     }
 }
@@ -267,8 +269,8 @@ static void source_rect(SDL_Rect *src) {
     src->y = cfg.overscan ? OVERSCAN : 0;
     src->h = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
     if (widescreen_on()) {
-        /* the part of the decoded frame that makes a 16:9 picture at this pixel aspect */
-        src->w = widescreen_visible_width(src->h, pixel_aspect());
+        /* the part of the decoded frame that makes a 16:9 or 16:10 picture at this pixel aspect */
+        src->w = widescreen_visible_width(src->h, pixel_aspect(), target_aspect(src->h));
         src->x = (WS_W - src->w) / 2;
     } else {
         src->x = 0; src->w = FB_W;
@@ -650,7 +652,7 @@ static void build_menu(void) {
     g[0] = (ui_item){ "Display mode", UI_CHOICE, GFX_CHANGED, &cfg.display_mode, display_modes, 3, 0, 0, 0, NULL, "", NULL };
     g[1] = (ui_item){ "Window size", UI_CHOICE, GFX_CHANGED, &window_size_idx, window_sizes, 6, 0, 0, 0, NULL, "", NULL };
     g[2] = (ui_item){ "Scaling", UI_CHOICE, GFX_CHANGED, &cfg.scaling, scalings, 3, 0, 0, 0, NULL, "", NULL };
-    g[3] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 3, 0, 0, 0, NULL, "", NULL };
+    g[3] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 4, 0, 0, 0, NULL, "", NULL };
     g[4] = (ui_item){ "Filter", UI_CHOICE, GFX_CHANGED, &cfg.filter, filters, 3, 0, 0, 0, NULL, "", NULL };
     g[5] = (ui_item){ "Overscan crop", UI_CHOICE, GFX_CHANGED, &cfg.overscan, onoff, 2, 0, 0, 0, NULL, "", NULL };
     g[6] = (ui_item){ "Low-latency sync", UI_CHOICE, GFX_CHANGED, &cfg.lowlat, onoff, 2, 0, 0, 0, NULL, "", NULL };
@@ -1044,18 +1046,23 @@ int main(int argc, char **argv) {
                 /* re-anchor the vblank grid: Present returning late means it waited for the vblank
                    (one-frame queue), otherwise ask the display directly every couple of seconds */
                 double anchor = 0;
-                if ((double)(t2 - t1) * tick_ms > 0.8 && fabs((double)t2 - deadline) < vblank) anchor = (double)t2;
+                int exact = 0;
+                /* a Present that blocked close to the predicted vblank re-phases the grid, but the
+                   refresh period is only measured between the display's own vblank reports */
+                if ((double)(t2 - t1) * tick_ms > 0.8 && fabs((double)t2 - deadline) < vblank * 0.25) anchor = (double)t2;
                 else if (--anchor_countdown <= 0) {
                     anchor_countdown = 120;
-                    if (gpu_sync_wait_vblank()) anchor = (double)SDL_GetPerformanceCounter();
+                    if (gpu_sync_wait_vblank()) { anchor = (double)SDL_GetPerformanceCounter(); exact = 1; }
                 }
                 if (anchor > 0) {
-                    if (last_anchor > 0) {
-                        double iv = anchor - last_anchor;
-                        int k = (int)(iv / vblank + 0.5);
-                        if (k >= 1 && k <= 64 && fabs(iv / k - vblank) < vblank * 0.1) vblank = vblank * 0.95 + (iv / k) * 0.05;
+                    if (exact) {
+                        if (last_anchor > 0) {
+                            double iv = anchor - last_anchor;
+                            int k = (int)(iv / vblank + 0.5);
+                            if (k >= 1 && k <= 4000 && fabs(iv / k - vblank) < vblank * 0.02) vblank = vblank * 0.9 + (iv / k) * 0.1;
+                        }
+                        last_anchor = anchor;
                     }
-                    last_anchor = anchor;
                     grid = anchor + vblank * vsync_div;
                 } else {
                     grid = deadline + vblank * vsync_div;

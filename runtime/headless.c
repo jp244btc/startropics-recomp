@@ -306,19 +306,24 @@ int main(int argc, char **argv) {
     if (png) { fb_to_rgb(rgb); png_write_rgb(png, 256, 240, rgb); }
     if (wide) {
         /* the centre of the canvas must be the normal frame, pixel for pixel, on every line the PPU drew
-           (lines it left blank show the map when the scene is decoded) */
+           (lines it left blank show the map when the scene is decoded; objects are left out here, they
+           complete a person the hardware cut at the left edge) */
+        widescreen_objects(0);
         int decoded = wide_to_rgb(rgb_wide);
+        widescreen_objects(1);
         wide_decoded += decoded; wide_frames++;
         fb_to_rgb(rgb);
         for (int y = 0; y < 240; y++)
             if ((!decoded || (ppu.line_emph[y] & 0x08)) &&
                 memcmp(rgb + y * 256 * 3, rgb_wide + ((y + WS_VBAND) * WS_W + WS_BAND) * 3, 256 * 3) != 0) wide_mismatch++;
+        wide_to_rgb(rgb_wide);
+        int objs = widescreen_objects_drawn();
         png_write_rgb(wide, WS_W, WS_H, rgb_wide);
         int tiles, bp, tp, bad = widescreen_check(&tiles, &bp, &tp);
         if (bad >= 0) { wide_tiles += tiles; wide_bad_tiles += bad; wide_pixels += tp; wide_bad_pixels += bp; }
-        printf("widescreen: %s, bands %s, centre %s the normal frame (%d of %d frames decoded)\n", wide,
+        printf("widescreen: %s, bands %s, centre %s the normal frame (%d of %d frames decoded), %d objects drawn\n", wide,
                decoded ? "decoded from the map" : "blank (scene not understood)",
-               wide_mismatch ? "DIFFERS from" : "identical to", wide_decoded, wide_frames);
+               wide_mismatch ? "DIFFERS from" : "identical to", wide_decoded, wide_frames, objs);
         printf("widescreen: decoder vs the game's own output over the decoded frames: %d of %d tiles differ, %.2f%% of the pixels (sprites)\n",
                wide_bad_tiles, wide_tiles, wide_pixels ? 100.0 * wide_bad_pixels / wide_pixels : 0.0);
     }

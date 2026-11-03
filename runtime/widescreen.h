@@ -20,10 +20,17 @@
    for its emphasis and grayscale bits). When the current scene uses a map format
    this module knows, everything the PPU did not draw is the map around the
    camera: the canvas beyond the picture, and the picture's lines whose
-   background was off (the overworld blanks its bottom 16). Otherwise the picture
-   is as the PPU drew it and the rest is black.
+   background was off (the overworld blanks its bottom 16), with the objects the
+   game keeps there. Otherwise the picture is as the PPU drew it and the rest is
+   black.
    Returns 1 when the map was decoded, 0 when the scene is not understood. */
 int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h);
+
+/* The field objects (villagers and the like) the game keeps beyond its screen, drawn into the
+   canvas by widescreen_render (on by default; the harness turns them off to compare the centre
+   with the PPU's frame), and how many of those the last render drew. */
+void widescreen_objects(int on);
+int  widescreen_objects_drawn(void);
 
 /* Self-check: decodes the tiles under the centre 256x224 of the current frame the
    way the bands are decoded and compares them with the PPU's nametables, then

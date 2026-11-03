@@ -217,12 +217,40 @@ between black bars:
    (224-239 in mode 0) show the map too, with the bits of the last line the
    PPU drew; so do the lines above and below the picture.
 
-The bands contain background only. The game does not simulate anything
-beyond the edges of the picture: enemies, villagers and items are object slots that
-exist only inside the picture, so there are no sprites to draw there, and a
-tile the game changed in VRAM directly (opened passages, the landing boat)
+A tile the game changed in VRAM directly (opened passages, the landing boat)
 appears when it scrolls into the centre, not in the bands. Scenes with an
 unknown format (dungeons, menus, text screens, cutscenes) get black bands.
+
+## 10. Field objects (villagers)
+
+The field engine keeps up to 16 objects in RAM, 16 bytes each at `$0300`:
+
+| byte | meaning |
+|---|---|
+| 0 | flags: bit 7 active, bit 6 shown, bit 5 never drawn, bit 0 being moved by a script (its live position is then `$75/$76` X, `$77/$78` Y, its tile `$79`, its facing `$7A`), bit 1 a fixed tile |
+| 1 | bits 7-5: the map layer (variant group) it belongs to; bits 1-0: sprite palette |
+| 2 | tile: bits 7-3 base tile, bits 2-0 facing / pose |
+| 12-15 | position: X (16-bit), Y low (0-239) and screen row, like the player's |
+
+Every frame the visibility pass (`$AABB`, bank 29) sets bit 6 for an active
+object whose layer is the one in use (`$5D`; `$5F` as well when `$5B` bit 7 is
+set, any layer when bit 1 is) and that lies within 128 / 135 pixels left /
+right of the player and 116 / 107 above / below: exactly the screen. It clears
+bit 6 otherwise, and objects without it are neither drawn nor moved. The sprite
+pass (`$B02E`) draws each shown object as two 8x16 sprites side by side, 8
+pixels left of its X and 13 lines above its Y; the tiles come from byte 2 through
+a table at `$B145` (facing x walking step, `$23` bit 4; bit 7 of an entry
+mirrors the pair), the palette from byte 1. The left sprite is hidden within 8
+pixels of the left edge (its X would wrap), the right one beyond the right
+edge; OAM slots rotate with the frame counter to share flicker.
+
+`widescreen_render()` applies the same rules with the canvas as the window:
+objects outside the player's window are drawn whole where they stand, and of
+the shown ones whatever the hardware left out (that hidden left half, the parts
+beyond the right edge and on the blank lines below line 224). The game builds
+the sprites one frame ahead of the picture with the camera the picture shows,
+so what the PPU drew is decided from the window around that camera. Inside a
+hut the outside layer is not in use, so the people outside stay hidden.
 Verified with the harness on the island, in Coralcola (0 of 41,216 tiles
 differ while walking around the village) and inside a hut (0 differ once
 the game's redraw has finished).

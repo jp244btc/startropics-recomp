@@ -13,10 +13,13 @@
  * and control register the PPU used for the frame and the current palette,
  * so they join the real picture without a seam.
  *
- * Only background tiles are decoded: the game has no objects beyond the
- * edges of the picture (they are not simulated there), so there is nothing
- * else to show. Any scene this module does not understand, and any frame whose
- * scroll does not agree with the player position, gets black around the picture.
+ * The field engine's objects (villagers and the like) are drawn too: the game
+ * keeps every one of them in RAM but shows, and moves, only those within a
+ * window around the player that is exactly its screen; the others stand
+ * frozen where they were. Those are drawn here the way the game's sprite
+ * routine would draw them, where the PPU did not. Any scene this module does
+ * not understand, and any frame whose scroll does not agree with the player
+ * position, gets black around the picture.
  */
 #include "widescreen.h"
 #include "nes.h"
@@ -36,6 +39,12 @@
 #define RAM_MAP_BANK    0x132   /* 8 KiB PRG bank with the map tables, mapped at $C000 */
 #define RAM_MAP_SET     0x133   /* offset of the map set's three pointers inside the bank header */
 #define RAM_SCREEN_MAP  0x400   /* 16x16 screen indices, row-major */
+#define RAM_FRAME       0x23    /* frame counter: bit 4 steps the objects' walking animation */
+#define RAM_SCENE_REQ   0x2A    /* bits 0-6: a scene change is pending */
+#define RAM_MOVER       0x75    /* the object a script is moving: X ($75/$76), Y ($77/$78), tile ($79), facing ($7A) */
+#define RAM_OBJECTS     0x300   /* 16 objects of 16 bytes: flags, group + palette, tile + facing, ..., X at +12, Y at +14 */
+#define OBJ_TABLE_BANK  29      /* the tile offsets by facing and animation step, at $B145 in bank 29 ($A000) */
+#define OBJ_TABLE       0x1145
 
 #define SCREEN_W 256
 #define SCREEN_H 240
@@ -248,6 +257,104 @@ static int render_block(mapset_t *m, int camx, int camy, int px0, int py0, int w
     return 1;
 }
 
+/* ---- field objects ---- */
+static int objects_on = 1, objects_drawn;
+
+/* One 8x16 sprite at (sx, sy) in the picture's coordinates (its top row is sy) into the part of the
+   canvas the caller renders, through the row masks in emph (sprites enabled, grayscale). With
+   outside_only, only pixels the PPU could not draw: beyond the 256 columns or on lines it left blank. */
+static void draw_sprite(const uint8_t *const chr[8], uint8_t tile, uint8_t attr, int sx, int sy, int outside_only,
+                        uint8_t *out, const uint8_t *emph, int px0, int py0, int w, int h) {
+    for (int r = 0; r < 16; r++) {
+        int line = sy + r, row = line - py0;
+        if (row < 0 || row >= h || !(emph[row] & 0x10)) continue;
+        int drawn_line = line >= 0 && line < 240 && (ppu.line_emph[line] & 0x10);
+        int fr = (attr & 0x80) ? 15 - r : r;
+        unsigned a = ((tile & 1) ? 0x1000u : 0) + ((tile & 0xFEu) + (fr >> 3)) * 16u + (fr & 7);
+        const uint8_t *pt = chr[(a >> 10) & 7] + (a & 0x3FF);
+        uint8_t gray = (emph[row] & 1) ? 0x30 : 0xFF;
+        for (int c = 0; c < 8; c++) {
+            int px = sx + c, col = px - px0;
+            if (col < 0 || col >= w) continue;
+            if (outside_only && drawn_line && px >= 0 && px < 256) continue;   /* the PPU drew this pixel */
+            int bit = (attr & 0x40) ? c : 7 - c;
+            int pix = ((pt[0] >> bit) & 1) | (((pt[8] >> bit) & 1) << 1);
+            if (pix) out[(size_t)row * w + col] = ppu.palette[16 + (attr & 3) * 4 + pix] & gray;
+        }
+    }
+}
+
+/* The objects as the field engine shows them (bank 29: visibility $AABB, sprites $B02E): an object
+   is shown when it is active, its group matches the map layer in use ($5D; $5F as well when $5B
+   bit 7 is set, any group when bit 1 is) and it lies within 128 / 135 pixels left / right of the
+   player and 116 / 107 above / below, which is the screen. It is drawn as two 8x16 sprites side by
+   side, 13 lines above its position, the tiles picked from its tile byte by facing and the walking
+   step. Here the objects outside that window are drawn whole, and of those inside it what the
+   hardware left out: the left half, which the game hides at the left edge, and the parts beyond
+   the right edge and below the last line drawn. The game builds the sprites one frame ahead of
+   the picture, with the camera the picture shows (camx, camy), so what the PPU drew follows from
+   the window around that camera; the object variables may already be a frame further. */
+static void draw_objects(int camx, int camy, uint8_t *out, const uint8_t *emph, int px0, int py0, int w, int h) {
+    objects_drawn = 0;
+    if (!objects_on || !(ppu.frame_ctrl & 0x20) || (ram[RAM_SCENE_REQ] & 0x7F)) return;   /* 8x16 sprites; no scene change pending */
+    if (cart.prg_size < (OBJ_TABLE_BANK + 1) * 8192u) return;
+    const uint8_t *table = cart.prg + OBJ_TABLE_BANK * 8192u + OBJ_TABLE;
+    const uint8_t *chr[8];
+    for (int i = 0; i < 8; i++) chr[i] = mapper_chr_bank_ptr(ppu.frame_chr_bank[i]);
+    int plx = ram[RAM_PLAYER_X] | (ram[RAM_PLAYER_X + 1] << 8);
+    int ply = ram[RAM_PLAYER_Y + 1] * SCREEN_H + ram[RAM_PLAYER_Y];
+    uint8_t grp_a = ram[RAM_TILE_GROUP], grp_b = ram[RAM_TILE_GROUP2] & 0xE0, sel = ram[RAM_FLAG_5B];
+    for (int o = 15; o >= 0; o--) {   /* the first object ends up on top */
+        const uint8_t *ob = ram + RAM_OBJECTS + o * 16;
+        uint8_t f = ob[0];
+        if ((f & 0xA0) != 0x80) continue;   /* inactive, or one the game never draws */
+        int moving = f & 1, ox, oy;
+        if (moving) {
+            ox = ram[RAM_MOVER] | (ram[RAM_MOVER + 1] << 8);
+            oy = ram[RAM_MOVER + 3] * SCREEN_H + ram[RAM_MOVER + 2];
+        } else {
+            uint8_t grp = ob[1] & 0xE0;
+            if (!(sel & 0x02) && grp != grp_a && !((sel & 0x80) && grp == grp_b)) continue;   /* another layer (a hut's inside or outside) */
+            ox = ob[12] | (ob[13] << 8);
+            oy = ob[15] * SCREEN_H + ob[14];
+        }
+        int dx = ox - plx, dy = oy - ply;
+        if (dx >= -128 && dx <= 135 && dy >= -116 && dy <= 107 && !(f & 0x40)) continue;   /* within the window, kept hidden */
+        int sx = ox - camx, sy = oy - camy - 12;   /* screen position; the sprites' top row */
+        /* the PPU drew it: within the window of the frame shown, and with its sprites on the screen
+           (a top row on line 0 means sprite Y 255, which the PPU does not show) */
+        int shown = sx >= 0 && sx <= 263 && sy >= 1 && sy <= 223;
+        if (sx + 8 <= px0 || sx - 8 >= px0 + w || sy + 16 <= py0 || sy >= py0 + h) continue;
+
+        /* the tiles, as the sprite routine picks them */
+        uint8_t pal = ob[1] & 3, tile, ta, tb, attr;
+        int direct = -1, flip = 0, base = ob[2], anim = (ram[RAM_FRAME] & 0x10) >> 1;
+        if (moving && ram[RAM_MOVER + 4]) {   /* the mover's own tile: as it is when it faces a way, else by the table */
+            uint8_t facing = ram[RAM_MOVER + 5], t = ram[RAM_MOVER + 4];
+            if (facing) { direct = t; flip = (facing & 0x80) != 0; }
+            else { base = t; anim = 0; }
+        } else if ((moving || (f & 2)) && ob[2]) {   /* a fixed tile */
+            direct = ob[2];
+        }
+        if (direct >= 0) {
+            tile = (uint8_t)direct;
+        } else {
+            uint8_t e = table[(base & 7) | anim];
+            flip = (e & 0x80) != 0;
+            tile = (uint8_t)((e & 0x7F) + (base & 0xF8));
+        }
+        if (flip) { tb = tile; ta = (uint8_t)(tile + 2); attr = pal | 0x40; }
+        else { ta = tile; tb = (uint8_t)(tile + 2); attr = pal; }
+        int a_drawn = shown && sx >= 8, b_drawn = shown && sx < 256;
+        draw_sprite(chr, ta, attr, sx - 8, sy, a_drawn, out, emph, px0, py0, w, h);
+        draw_sprite(chr, tb, attr, sx, sy, b_drawn, out, emph, px0, py0, w, h);
+        if (!a_drawn || !b_drawn) objects_drawn++;
+    }
+}
+
+void widescreen_objects(int on) { objects_on = on; }
+int widescreen_objects_drawn(void) { return objects_drawn; }
+
 int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
     int px0 = x - WS_BAND, py0 = y - WS_VBAND;   /* the rectangle in the picture's coordinates */
     int c0 = px0 > 0 ? px0 : 0, c1 = px0 + w < 256 ? px0 + w : 256;   /* the picture's columns in it */
@@ -284,8 +391,12 @@ int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
             }
             r += n;
         }
-        if (ok) return 1;
+        if (ok) {
+            draw_objects(camx, camy, out, emph, px0, py0, w, h);
+            return 1;
+        }
     }
+    objects_drawn = 0;
     /* not understood: the picture as the PPU drew it, black around it */
     for (int r = 0; r < h; r++) {
         int ly = py0 + r;

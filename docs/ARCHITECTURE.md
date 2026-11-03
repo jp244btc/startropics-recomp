@@ -167,6 +167,8 @@ emphasis of each. The frontend asks for the part it shows: 16:9 or 16:10 of
 the canvas at the pixel shape, or with Integer scaling in fullscreen every line
 and column the screen holds at the multiple. The headless harness
 (`--widescreen`) checks the decoder against the PPU's nametables and pixels.
+The field objects (villagers) the game keeps beyond its screen are drawn there
+with the game's own visibility and sprite rules (formats file, section 10).
 Other scene types (dungeon rooms with the status-bar split) are not decoded and
 get black bars around the normal picture; the IRQ modes are described in the
 formats file.

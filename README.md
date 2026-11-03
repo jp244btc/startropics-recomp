@@ -66,10 +66,12 @@ overworld's map data from your ROM (the screen grid, the run-length coded
 metatile rows and the metatile table; `docs/MAP_FORMATS.md`) and draws the
 world around the normal picture with the same CHR banks, palette and scroll
 the PPU used, so there is no seam. The centre stays the game's own output
-(the 16 lines the overworld leaves blank at the bottom show the map too). Only background is extended: the game simulates nothing
-beyond the edge, so no enemies or people appear there. Scenes whose format is
-not decoded (dungeons, menus, text screens) show the normal 4:3 picture between
-black bars. The pixels keep their 4:3 CRT shape: a 16:9 picture shows 341
+(the 16 lines the overworld leaves blank at the bottom show the map too). The people
+are there as well: the game keeps every villager in memory but shows and moves
+only those on its own screen, so the others stand where they were, drawn with the
+game's own sprite rules (a hut's inside hides the people outside, as in the game).
+Scenes whose format is not decoded (dungeons, menus, text screens) show the
+normal 4:3 picture between black bars. The pixels keep their 4:3 CRT shape: a 16:9 picture shows 341
 columns (318 with the overscan crop). With Integer scaling in fullscreen the
 picture fills the whole screen at the largest whole multiple, with the map
 above, below and beside it (1280x800 at 3x on the Steam Deck); the decoder

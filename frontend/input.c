@@ -39,6 +39,31 @@ static int is_open(SDL_JoystickID id) {
     return 0;
 }
 
+/* Steam Input (Big Picture, the Steam Deck) lists the controllers it has taken over in
+   SDL_GAMECONTROLLER_IGNORE_DEVICES (VID/PID pairs) and gives the game a virtual pad for them.
+   SDL then treats them as plain joysticks; opening them here as generic joysticks as well
+   would read every press twice, once with the wrong layout. */
+static int listed(const char *list, Uint16 vendor, Uint16 product) {
+    if (!list) return 0;
+    char id[16];
+    snprintf(id, sizeof id, "0x%04x/0x%04x", vendor, product);
+    size_t len = strlen(id);
+    for (const char *p = list; *p;) {
+        while (*p == ' ' || *p == ',') p++;
+        size_t n = strcspn(p, ",");
+        if (n == len && SDL_strncasecmp(p, id, len) == 0) return 1;
+        p += n;
+    }
+    return 0;
+}
+
+static int taken_over(int index) {
+    Uint16 v = SDL_JoystickGetDeviceVendor(index), p = SDL_JoystickGetDeviceProduct(index);
+    const char *except = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
+    if (except && *except) return !listed(except, v, p);
+    return listed(SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES), v, p);
+}
+
 static void open_device(int index) {
     if (index < 0 || index >= SDL_NumJoysticks()) return;
     if (is_open(SDL_JoystickGetDeviceInstanceID(index))) return;
@@ -52,6 +77,10 @@ static void open_device(int index) {
             if (map) SDL_free(map);
         }
     } else {
+        if (taken_over(index)) {
+            printf("joystick left to Steam Input: %s\n", SDL_JoystickNameForIndex(index));
+            return;
+        }
         if (nsticks >= MAX_DEVICES) return;
         SDL_Joystick *j = SDL_JoystickOpen(index);
         if (j) { sticks[nsticks++] = j; printf("joystick (generic layout): %s\n", SDL_JoystickName(j)); }

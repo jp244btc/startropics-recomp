@@ -15,6 +15,10 @@ For testing the APK on a handheld over adb without touching it. Paths below are 
   adb shell /data/local/tmp/vpad /data/local/tmp/vpad.fifo        # -t: digital L2 / R2 only
   ```
 
+  On a Steam Deck, build it with `gcc -O2 -static` and run it with `-x`: it is then an Xbox 360
+  pad, which Steam Input takes over the way it does a real one, so the game reads it only
+  through Steam's virtual pad, like the Deck's own controls (the deck user may use /dev/uinput).
+
 * `vp.sh` - sends commands and waits until they have run, for example
   `adb shell 'sh /data/local/tmp/vp.sh "press down" "chord l2 r2 40 250" "wait 500"'`.
   Buttons: a b x y l1 r1 l2 r2 (l2a / r2a axis only, l2k / r2k key only) select start mode

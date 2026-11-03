@@ -146,6 +146,7 @@ dist: $(BUILD)/startropics$(EXE)
 	cp docs/PLAYERS.md dist/startropics/README.txt
 	@test -z "$(RCHEEVOS_SRC)" || cp third_party/rcheevos/LICENSE dist/startropics/LICENSE-rcheevos.txt
 	@test "$(DECK_EDITION)" != 1 || cp docs/STEAMDECK.md dist/startropics/STEAMDECK.txt
+	@test "$(DECK_EDITION)" != 1 || cp tools/steamdeck/add-to-steam.py dist/startropics/
 	@test "$(WINDOWS)" = 1 || cp frontend/icon_preview.png dist/startropics/startropics.png
 	$(PYTHON) -c "import shutil; shutil.make_archive('dist/startropics-$(PLATFORM)', '$(ARCHIVE)', 'dist', 'startropics')"
 	@echo "package: dist/startropics-$(PLATFORM).$(if $(filter zip,$(ARCHIVE)),zip,tar.gz)"

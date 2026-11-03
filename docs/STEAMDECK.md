@@ -11,9 +11,13 @@ Install (Desktop Mode)
 1. Extract this folder somewhere in your home folder, for example ~/Games/StarTropics.
 2. Copy your StarTropics (USA) .nes file into that same folder. The program finds it
    there by itself the first time (it checks the file's hash and remembers it).
-3. Open Steam, then Games > Add a Non-Steam Game to My Library > Browse. Switch the file
-   type filter to "All Files", pick `startropics` in the folder, then Add Selected
-   Programs. Optionally set startropics.png as the shortcut's icon.
+3. Open Konsole in that folder (Dolphin: right-click > Open Terminal Here) and run
+   `python3 add-to-steam.py`. It closes Steam, adds StarTropics as a non-Steam game with
+   its library artwork from SteamGridDB (portrait and wide capsules, hero, logo, icon),
+   and starts Steam again. Running it again replaces the shortcut;
+   `python3 add-to-steam.py --remove` takes it out again.
+   (By hand instead: Steam > Games > Add a Non-Steam Game to My Library > Browse, switch
+   the file type filter to "All Files", pick `startropics`, Add Selected Programs.)
 4. Return to Game Mode and start StarTropics from your library.
 
 Controls (Steam's default gamepad layout)
@@ -33,6 +37,9 @@ Every button can be changed on the menu's Controls tab.
 
 Tips
 ----
+- Graphics > Scaling: Fit (the default) fills the 1280x800 screen with the 16:10 picture.
+  Integer keeps exact pixels at 3x: with a widescreen aspect it is 1280x720 with thin bars
+  above and below (Overscan crop off; 1280x672 with it on).
 - Deck OLED: for perfectly even motion set the refresh rate to 60 Hz for this game in
   the quick access menu (Performance). The NES runs at 60 Hz.
 - Latency: Graphics > Low-latency sync (on by default) hands each frame to the screen

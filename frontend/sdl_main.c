@@ -478,12 +478,30 @@ static double target_aspect(int src_h) {
    16:9 mode keeps (it adds picture at the sides instead of changing the pixel shape) */
 static double pixel_aspect(void) { return cfg.aspect == 0 ? 1.0 : 1.25; }
 
+/* the output the picture is composed for, set by its users before source_rect */
+static int pic_out_w, pic_out_h;
+
+/* the shape the picture is drawn in: the chosen aspect, except that Integer scaling with a
+   widescreen aspect on a fixed screen (fullscreen, a handheld) widens it to the screen's width at
+   the largest whole multiple. The map decoder supplies the columns, so only bars above and below
+   are left (3x on the Steam Deck: 1280x720 instead of 1152x720). */
+static double picture_aspect(int src_h) {
+    double a = target_aspect(src_h);
+    if (cfg.scaling == 0 && widescreen_on() && cfg.display_mode != 0 && pic_out_w > 0 && pic_out_h >= src_h) {
+        double screen = (double)pic_out_w / (src_h * (pic_out_h / src_h));
+        double widest = WS_W * pixel_aspect() / src_h;
+        if (screen > widest) screen = widest;
+        if (screen > a) a = screen;
+    }
+    return a;
+}
+
 static void source_rect(SDL_Rect *src) {
     src->y = cfg.overscan ? OVERSCAN : 0;
     src->h = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
     if (widescreen_on()) {
         /* the part of the decoded frame that makes a 16:9 or 16:10 picture at this pixel aspect */
-        src->w = widescreen_visible_width(src->h, pixel_aspect(), target_aspect(src->h));
+        src->w = widescreen_visible_width(src->h, pixel_aspect(), picture_aspect(src->h));
         src->x = (WS_W - src->w) / 2;
     } else {
         src->x = 0; src->w = FB_W;
@@ -491,7 +509,7 @@ static void source_rect(SDL_Rect *src) {
 }
 
 static void dest_rect(int ww, int wh, const SDL_Rect *src, SDL_Rect *dst) {
-    double aspect = target_aspect(src->h);
+    double aspect = picture_aspect(src->h);
     int w, h;
     if (cfg.scaling == 2) { dst->x = 0; dst->y = 0; dst->w = ww; dst->h = wh; return; }
     if (cfg.scaling == 0) {
@@ -685,13 +703,15 @@ static void draw_game_ex(int backdrop) {
     int ww, wh;
     SDL_GetRendererOutputSize(renderer, &ww, &wh);
     SDL_Rect src, dst;
-    source_rect(&src);
     int saved_scaling = cfg.scaling, saved_filter = cfg.filter;
     /* where the picture is composed: the window, or in fullscreen the chosen
        resolution, scaled to the screen afterwards */
     int out_w = ww, out_h = wh;
     int internal = !backdrop && cfg.display_mode == 1 && cfg.res_w > 0;
     if (internal) { out_w = cfg.res_w; out_h = cfg.res_h; }
+    pic_out_w = backdrop ? 0 : out_w;   /* the menu's backdrop keeps the chosen shape */
+    pic_out_h = out_h;
+    source_rect(&src);
     int fx = !backdrop && cfg.shader != 0;
     int use_scene = fx || internal;
     if (backdrop) {
@@ -912,6 +932,7 @@ static void apply_graphics(void) {
 }
 
 static void toggle_fullscreen(void) {
+    if (handheld) return;   /* a handheld's own screen: always fullscreen */
     cfg.display_mode = cfg.display_mode ? 0 : 1;
     apply_graphics();
 }
@@ -1343,7 +1364,7 @@ static void layout_gfx(void) {
     int n = 0;
     for (int i = 0; i < GFX_ROWS; i++) {
         if (i == GFX_WINDOW_SIZE_ROW && cfg.res_w > 0) continue;
-        if (FIXED_FULLSCREEN && i <= GFX_WINDOW_SIZE_ROW) continue;   /* display mode, resolution, window size */
+        if (handheld && i <= GFX_WINDOW_SIZE_ROW) continue;   /* display mode, resolution, window size: the screen is fixed */
         gfx_items[n++] = gfx_all[i];
     }
     tabs[TAB_GFX].nitems = n;
@@ -1360,6 +1381,8 @@ static void refresh_gfx_info(void) {
     const char *where = cfg.display_mode == 2 ? "display mode" : cfg.display_mode == 1 ? "screen" : "window";
     if (cfg.display_mode == 1 && cfg.res_w > 0) { out_w = cfg.res_w; out_h = cfg.res_h; where = "render size"; }
     SDL_Rect src, dst;
+    pic_out_w = out_w;
+    pic_out_h = out_h;
     source_rect(&src);
     dest_rect(out_w, out_h, &src, &dst);
     int full_w = dst.w >= out_w - 1, full_h = dst.h >= out_h - 1;
@@ -1385,8 +1408,17 @@ static void refresh_gfx_info(void) {
         else if (cfg.scaling == 0)
             snprintf(why, sizeof why, "\nInteger rounds down to a whole multiple. Fit fills the %s.", where);
     }
-    snprintf(gfx_all[GFX_INFO_ROW].info, sizeof gfx_all[GFX_INFO_ROW].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s",
-             dst.w, dst.h, out_w, out_h, where, (double)dst.h / src.h, why);
+    char hz[160] = "";
+    if (deck_mode && refresh_hz > 0) {
+        /* the Deck OLED runs at 90 Hz by default, which shows 60 frames a second unevenly */
+        int div = (int)(refresh_hz / 60.0 + 0.5);
+        if (div < 1) div = 1;
+        if (fabs(refresh_hz / div - 60.0) > 1.5)
+            snprintf(hz, sizeof hz, "\nThe screen runs at %.0f Hz. For even motion set 60 Hz for this game: "
+                     "quick access menu > Performance > per-game profile.", refresh_hz);
+    }
+    snprintf(gfx_all[GFX_INFO_ROW].info, sizeof gfx_all[GFX_INFO_ROW].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s%s",
+             dst.w, dst.h, out_w, out_h, where, (double)dst.h / src.h, why, hz);
     layout_gfx();
 }
 
@@ -1891,6 +1923,34 @@ int main(int argc, char **argv) {
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
     const char *list_modes_file = NULL;
     int list_modes_flag = 0, chord_test = 0;
+#if !defined(_WIN32) && !defined(__ANDROID__)
+    /* diagnostics on Linux, where a Steam shortcut has no easy command line: when started
+       without options, those in args.txt next to the program (one per line) are used */
+    static char *file_args[34];
+    if (argc == 1) {
+        char exe[1024], path[1100];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        char *slash = n > 0 ? (exe[n] = 0, strrchr(exe, '/')) : NULL;
+        FILE *f = NULL;
+        if (slash) {
+            snprintf(path, sizeof path, "%.*sargs.txt", (int)(slash - exe + 1), exe);
+            f = fopen(path, "r");
+        }
+        if (f) {
+            char line[1024];
+            int k = 1;
+            file_args[0] = argv[0];
+            while (k < 33 && fgets(line, sizeof line, f)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (line[0]) file_args[k++] = strdup(line);
+            }
+            fclose(f);
+            file_args[k] = NULL;
+            argc = k;
+            argv = file_args;
+        }
+    }
+#endif
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest") && i + 2 < argc) { selftest_frames = atoi(argv[i + 1]); selftest_png = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--ui-shot") && i + 1 < argc) {
@@ -1976,10 +2036,10 @@ int main(int argc, char **argv) {
         }
         write_config();
     }
-#if FIXED_FULLSCREEN
-    cfg.display_mode = 1;
-    cfg.res_w = cfg.res_h = 0;
-#endif
+    if (handheld) {   /* a handheld's own screen; the menu has no window or resolution rows here */
+        cfg.display_mode = 1;
+        cfg.res_w = cfg.res_h = 0;
+    }
     if (stats_path) stats_file = nes_fopen(stats_path, "w");
 
     apu_set_sample_rate(SAMPLE_RATE);

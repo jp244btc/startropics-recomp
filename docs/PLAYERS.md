@@ -21,8 +21,10 @@ Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
               1920x1080 and 3840x2160: the window size, the display mode in
               exclusive fullscreen, or the size the picture is rendered at in
               fullscreen), window size 1x-6x (shown while the resolution is Auto),
-              scaling (integer: exact pixel multiples, may leave borders / fit: fills
-              the screen, keeps the shape / stretch: fills, distorts),
+              scaling (integer: exact pixel multiples, may leave borders; with a
+              widescreen aspect in fullscreen it widens to the screen's width, more
+              of the map at the sides / fit: fills the screen, keeps the shape /
+              stretch: fills, distorts),
               aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 or 16:10 widescreen:
               the overworld map is decoded beside the picture, other scenes get
               black bars, nothing is stretched),

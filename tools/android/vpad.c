@@ -1,6 +1,8 @@
 /* vpad.c - a virtual copy of the AYANEO Pocket EVO's built-in controller (uinput), for testing the
    StarTropics port on the device. Same keys, axes, ranges and USB ids as "AYANEO Controller".
-   usage: vpad FIFO [-t]     (-t: no analog trigger axes, L2 / R2 as plain buttons only)
+   usage: vpad FIFO [-t] [-x]  (-t: no analog trigger axes, L2 / R2 as plain buttons only;
+                                -x: an Xbox 360 pad instead (xpad layout, 045e:028e), which Steam
+                                Input takes over on a Steam Deck the way it does a real one)
    commands, one per line, written to FIFO:
      down BTN | up BTN | press BTN [ms] | chord BTN1 BTN2 [gap_ms] [hold_ms] | wait ms | done PATH | quit
    buttons: a b x y l1 r1 l2 r2 (key + axis) l2a r2a (axis only) l2k r2k (key only)
@@ -16,6 +18,7 @@
 
 static int fd;
 static int no_trigger_axes;
+static int xbox;
 
 static void emit(int type, int code, int value) {
     struct input_event ev;
@@ -50,6 +53,11 @@ static const struct btn *find(const char *n) {
 }
 
 static void set(const struct btn *b, int on) {
+    int trig_l = b->abs == ABS_BRAKE || b->key == 312, trig_r = b->abs == ABS_GAS || b->key == 313;
+    if (xbox && (trig_l || trig_r)) {   /* xpad: the triggers are the ABS_Z / ABS_RZ axes, no buttons */
+        emit(EV_ABS, trig_l ? ABS_Z : ABS_RZ, on ? 255 : 0);
+        return;
+    }
     if (b->key >= 0) emit(EV_KEY, b->key, on);
     if (b->abs >= 0 && !(no_trigger_axes && (b->abs == ABS_GAS || b->abs == ABS_BRAKE))) emit(EV_ABS, b->abs, on ? b->absval : 0);
 }
@@ -66,11 +74,19 @@ static int create(void) {
     fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) { perror("/dev/uinput"); return 0; }
     ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    for (int k = 304; k <= 318; k++) ioctl(fd, UI_SET_KEYBIT, k);
+    for (int k = 304; k <= 318; k++)
+        if (!xbox || (k != 306 && k != 309 && k != 312 && k != 313)) ioctl(fd, UI_SET_KEYBIT, k);
     ioctl(fd, UI_SET_EVBIT, EV_ABS);
-    int sticks[] = { ABS_X, ABS_Y, ABS_Z, ABS_RZ };
-    for (int i = 0; i < 4; i++) { ioctl(fd, UI_SET_ABSBIT, sticks[i]); abs_setup(sticks[i], -32768, 32767, 255, 4095); }
-    if (!no_trigger_axes) {
+    if (xbox) {   /* xpad: sticks X/Y and RX/RY, triggers Z / RZ 0..255 */
+        int sticks[] = { ABS_X, ABS_Y, ABS_RX, ABS_RY };
+        for (int i = 0; i < 4; i++) { ioctl(fd, UI_SET_ABSBIT, sticks[i]); abs_setup(sticks[i], -32768, 32767, 16, 128); }
+        ioctl(fd, UI_SET_ABSBIT, ABS_Z); abs_setup(ABS_Z, 0, 255, 0, 0);
+        ioctl(fd, UI_SET_ABSBIT, ABS_RZ); abs_setup(ABS_RZ, 0, 255, 0, 0);
+    } else {
+        int sticks[] = { ABS_X, ABS_Y, ABS_Z, ABS_RZ };
+        for (int i = 0; i < 4; i++) { ioctl(fd, UI_SET_ABSBIT, sticks[i]); abs_setup(sticks[i], -32768, 32767, 255, 4095); }
+    }
+    if (!xbox && !no_trigger_axes) {
         ioctl(fd, UI_SET_ABSBIT, ABS_GAS); abs_setup(ABS_GAS, 0, 255, 0, 15);
         ioctl(fd, UI_SET_ABSBIT, ABS_BRAKE); abs_setup(ABS_BRAKE, 0, 255, 0, 15);
     }
@@ -80,8 +96,14 @@ static int create(void) {
     ioctl(fd, UI_SET_MSCBIT, MSC_SCAN);
     struct uinput_setup us;
     memset(&us, 0, sizeof us);
-    us.id.bustype = BUS_USB; us.id.vendor = 0x4001; us.id.product = 0x0428; us.id.version = 0x0111;
-    snprintf(us.name, sizeof us.name, "AYANEO Controller");
+    us.id.bustype = BUS_USB;
+    if (xbox) {
+        us.id.vendor = 0x045e; us.id.product = 0x028e; us.id.version = 0x0114;
+        snprintf(us.name, sizeof us.name, "Microsoft X-Box 360 pad");
+    } else {
+        us.id.vendor = 0x4001; us.id.product = 0x0428; us.id.version = 0x0111;
+        snprintf(us.name, sizeof us.name, "AYANEO Controller");
+    }
     if (ioctl(fd, UI_DEV_SETUP, &us) < 0) { perror("UI_DEV_SETUP"); return 0; }
     if (ioctl(fd, UI_DEV_CREATE) < 0) { perror("UI_DEV_CREATE"); return 0; }
     return 1;
@@ -116,7 +138,10 @@ static int run(char *line) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: vpad FIFO [-t]\n"); return 2; }
-    if (argc > 2 && !strcmp(argv[2], "-t")) no_trigger_axes = 1;
+    for (int a = 2; a < argc; a++) {
+        if (!strcmp(argv[a], "-t")) no_trigger_axes = 1;
+        else if (!strcmp(argv[a], "-x")) xbox = 1;
+    }
     if (!create()) return 1;
     printf("vpad: created%s\n", no_trigger_axes ? " (digital triggers only)" : "");
     fflush(stdout);

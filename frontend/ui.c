@@ -116,21 +116,39 @@ void ui_draw(SDL_Renderer *r, ui_menu *m, int ww, int wh) {
     for (int i = 0; i < t->nitems && i < UI_MAX_ITEMS; i++) {
         ui_item *it = &t->items[i];
         if (it->kind == UI_INFO) {
-            /* multi-line dim text */
-            char buf[400];
-            snprintf(buf, sizeof buf, "%s", it->info);
+            /* dim text: '\n' separates paragraphs, each wrapped at words to the panel's width */
             int small = s > 1 ? s - 1 : 1;
-            if (s >= 4) small = s - 1; else if (s >= 2) small = s - 1; else small = 1;
             int lh = FONT_CELL_H * small + small;
+            int maxw = right.w - 2 * mg;
             SDL_Rect rc = { right.x, iy, right.w, 0 };
-            char *p = buf;
             int ly = iy + s;
-            while (p && *p) {
-                char *nl = strchr(p, '\n');
-                if (nl) *nl = 0;
-                font_draw(r, right.x + mg, ly, small, C_DIM, 0, p);
-                ly += lh;
-                p = nl ? nl + 1 : NULL;
+            const char *p = it->info;
+            while (*p) {
+                const char *end = strchr(p, '\n');
+                size_t plen = end ? (size_t)(end - p) : strlen(p);
+                size_t start = 0;
+                if (plen == 0) ly += lh;
+                while (start < plen) {
+                    /* the longest run of words from start that fits (at least one word) */
+                    size_t best = 0;
+                    for (size_t k = start; k <= plen; k++) {
+                        if (k < plen && p[k] != ' ') continue;
+                        size_t len = k - start;
+                        if (len == 0) continue;
+                        if (best == 0 || (int)len * FONT_CELL_W * small <= maxw) best = len;
+                        if ((int)len * FONT_CELL_W * small > maxw) break;
+                    }
+                    char line[400];
+                    if (best >= sizeof line) best = sizeof line - 1;
+                    memcpy(line, p + start, best);
+                    line[best] = 0;
+                    font_draw(r, right.x + mg, ly, small, C_DIM, 0, line);
+                    ly += lh;
+                    start += best;
+                    while (start < plen && p[start] == ' ') start++;
+                }
+                p += plen;
+                if (*p == '\n') p++;
             }
             rc.h = ly - iy + s;
             m->item_rects[i] = rc;

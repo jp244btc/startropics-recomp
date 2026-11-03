@@ -34,9 +34,9 @@ and the dimmed, upscaled title screen becomes the backdrop. Put a
 instead (no artwork is bundled: Nintendo's promotional art cannot be shipped).
 
 Options (all saved to `startropics.ini`): windowed / fullscreen / exclusive
-fullscreen, resolution presets (720p, 1280x800, 1080p, 1440p, 2560x1600, 4K: the
-window size, the exclusive display mode, or the render size in borderless
-fullscreen), window size 1x-6x, scaling (integer / fit / stretch), aspect
+fullscreen, a resolution list built from the display's own modes plus 1920x1080
+and 3840x2160 (the window size, the exclusive display mode, or the render size in
+borderless fullscreen), window size 1x-6x, scaling (integer / fit / stretch), aspect
 ratio (square pixels 8:7, 4:3 CRT, 16:9 or 16:10 widescreen: below), filter
 (nearest / linear / sharp), CRT-style shaders (scanlines, aperture mask, glow,
 curvature; three strengths), overscan crop, a no-sprite-limit mode (every sprite

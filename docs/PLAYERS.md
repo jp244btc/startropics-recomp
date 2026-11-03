@@ -17,10 +17,10 @@ Menu (Esc in game)
 Play          Start / resume, reset, save state, load state, the save state slot
               (1-9, with the date the slot was last saved), end game, quit
 Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
-              resolution (auto, 1280x720, 1280x800, 1920x1080, 2560x1440,
-              2560x1600, 3840x2160: the window size, the display mode in exclusive
-              fullscreen, or the size the picture is rendered at in fullscreen),
-              window size 1x-6x (when the resolution is Auto),
+              resolution (auto, the sizes your display offers, and always
+              1920x1080 and 3840x2160: the window size, the display mode in
+              exclusive fullscreen, or the size the picture is rendered at in
+              fullscreen), window size 1x-6x (shown while the resolution is Auto),
               scaling (integer: exact pixel multiples, may leave borders / fit: fills
               the screen, keeps the shape / stretch: fills, distorts),
               aspect ratio (square pixels 8:7 / 4:3 CRT / 16:9 or 16:10 widescreen:

@@ -66,7 +66,8 @@ typedef struct {
     int pad[K_TOTAL];    /* SDL_GameControllerButton per NES button / hotkey, -1 = none */
     int window_size;     /* 1..6 */
     int display_mode;    /* 0 windowed, 1 fullscreen, 2 fullscreen exclusive */
-    int resolution;      /* 0 auto (window size), else resolutions[]: the window size, the exclusive display mode, or the render size in fullscreen */
+    int resolution;      /* index into res_list for the menu (0 = auto); res_w/res_h is the saved setting */
+    int res_w, res_h;    /* chosen size, 0 = auto: the window size, the exclusive display mode, or the render size in fullscreen */
     int scaling;         /* 0 integer, 1 fit, 2 stretch */
     int aspect;          /* 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen (map decoded beside the picture, black bars elsewhere), 3 16:10 */
     int filter;          /* 0 nearest, 1 linear, 2 sharp */
@@ -87,7 +88,7 @@ typedef struct {
 static config_t cfg = {
     .key = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE },
     .pad = { -1, -1, -1, -1, -1, -1, -1, -1, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
-    .window_size = 3, .display_mode = 0, .resolution = 0, .scaling = 1, .aspect = 1, .filter = 2,
+    .window_size = 3, .display_mode = 0, .resolution = 0, .res_w = 0, .res_h = 0, .scaling = 1, .aspect = 1, .filter = 2,
     .shader = 0, .shader_strength = 1, .overscan = 1, .no_sprite_limit = 0, .volume = 100,
     .lowlat = 1, .runahead = 2, .audio_latency = 1, .rewind = 1, .state_slot = 1, .ra_hardcore = 0, .rom = ""
 };
@@ -103,12 +104,16 @@ static const char *const onoff[]         = { "Off", "On" };
 static const char *const shader_names[]  = { "Off", "Scanlines", "CRT", "CRT curved", "Glow" };
 static const char *const strength_names[] = { "Light", "Medium", "Strong" };
 static const char *const sprite_limits[] = { "8 per line (original)", "Unlimited (no flicker)" };
-/* resolution presets: the window size, the exclusive-fullscreen display mode, or in fullscreen the size the picture is rendered at */
-#define N_RESOLUTIONS 7
-static const struct { int w, h; } resolutions[N_RESOLUTIONS] = {
-    { 0, 0 }, { 1280, 720 }, { 1280, 800 }, { 1920, 1080 }, { 2560, 1440 }, { 2560, 1600 }, { 3840, 2160 } };
-static const char *const resolution_names[N_RESOLUTIONS] = {
-    "Auto (window size)", "1280x720", "1280x800", "1920x1080", "2560x1440", "2560x1600", "3840x2160 (4K)" };
+/* resolution choices: Auto (the window size), then the sizes the display's driver offers, with
+   1920x1080 and 3840x2160 always present. A size is the window size, the display mode in
+   exclusive fullscreen, or in fullscreen the size the picture is rendered at. */
+#define MAX_RES 40
+static struct { int w, h; } res_list[MAX_RES];
+static char res_name_buf[MAX_RES][28];
+static const char *res_names[MAX_RES];
+static int n_res;
+/* the fixed list of the previous version, for its numeric settings */
+static const struct { int w, h; } legacy_res[7] = { { 0, 0 }, { 1280, 720 }, { 1280, 800 }, { 1920, 1080 }, { 2560, 1440 }, { 2560, 1600 }, { 3840, 2160 } };
 
 /* ------------------------------------------------------------------ */
 /* state                                                               */
@@ -168,7 +173,10 @@ static double refresh_hz;             /* reported display refresh rate, 0 if unk
 enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT, ACT_RA_LOGIN,
        GFX_CHANGED, AUD_CHANGED, LAT_CHANGED, KEY_CHANGED, SLOT_CHANGED, RA_CHANGED, RA_TEXT };
 enum { TAB_PLAY, TAB_GFX, TAB_AUDIO, TAB_CONTROLS, TAB_RA, TAB_ROM, N_TABS };
-static ui_item play_items[8], gfx_items[13], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
+static ui_item play_items[8], gfx_all[13], gfx_items[13], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
+#define GFX_ROWS 13
+#define GFX_WINDOW_SIZE_ROW 2
+#define GFX_INFO_ROW 12
 static ui_tab tabs[N_TABS];
 static ui_menu menu;
 
@@ -291,7 +299,8 @@ static void write_config(void) {
     for (int i = 0; i < K_TOTAL; i++) fprintf(f, "pad_%s=%s\n", key_names[i], input_pad_name(cfg.pad[i]));
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen, 2 fullscreen exclusive\n", cfg.display_mode);
-    fprintf(f, "resolution=%d          ; 0 auto (window size), 1 1280x720, 2 1280x800, 3 1920x1080, 4 2560x1440, 5 2560x1600, 6 3840x2160\n", cfg.resolution);
+    if (cfg.res_w > 0) fprintf(f, "resolution=%dx%d  ; auto (window size), or WxH: the window size, the display mode in exclusive fullscreen, or the render size in fullscreen\n", cfg.res_w, cfg.res_h);
+    else fputs("resolution=auto       ; auto (window size), or WxH: the window size, the display mode in exclusive fullscreen, or the render size in fullscreen\n", f);
     fprintf(f, "scaling=%d             ; 0 integer (exact pixels, may leave borders), 1 fit (fills the screen), 2 stretch (distorts)\n", cfg.scaling);
     fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen, 3 16:10 widescreen (map decoded beside the picture, black bars elsewhere)\n", cfg.aspect);
     fprintf(f, "filter=%d              ; 0 nearest, 1 linear, 2 sharp\n", cfg.filter);
@@ -342,7 +351,12 @@ static void load_config(void) {
         if (!strcmp(key, "rom")) snprintf(cfg.rom, sizeof cfg.rom, "%s", val);
         else if (!strcmp(key, "window_size")) { int v = atoi(val); if (v >= 1 && v <= 6) cfg.window_size = v; }
         else if (!strcmp(key, "display_mode")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.display_mode = v; }
-        else if (!strcmp(key, "resolution")) { int v = atoi(val); if (v >= 0 && v < N_RESOLUTIONS) cfg.resolution = v; }
+        else if (!strcmp(key, "resolution")) {
+            int w = 0, h = 0;
+            if (sscanf(val, "%dx%d", &w, &h) == 2 && w >= 256 && h >= 240 && w <= 16384 && h <= 16384) { cfg.res_w = w; cfg.res_h = h; }
+            else if (strlen(val) == 1 && val[0] >= '0' && val[0] <= '6') { cfg.res_w = legacy_res[val[0] - '0'].w; cfg.res_h = legacy_res[val[0] - '0'].h; }
+            else cfg.res_w = cfg.res_h = 0;
+        }
         else if (!strcmp(key, "scaling")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.scaling = v; }
         else if (!strcmp(key, "aspect")) { int v = atoi(val); if (v >= 0 && v <= 3) cfg.aspect = v; }
         else if (!strcmp(key, "filter")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.filter = v; }
@@ -596,8 +610,8 @@ static void draw_game_ex(int backdrop) {
     /* where the picture is composed: the window, or in fullscreen the chosen
        resolution, scaled to the screen afterwards */
     int out_w = ww, out_h = wh;
-    int internal = !backdrop && cfg.display_mode == 1 && cfg.resolution > 0 && cfg.resolution < N_RESOLUTIONS;
-    if (internal) { out_w = resolutions[cfg.resolution].w; out_h = resolutions[cfg.resolution].h; }
+    int internal = !backdrop && cfg.display_mode == 1 && cfg.res_w > 0;
+    if (internal) { out_w = cfg.res_w; out_h = cfg.res_h; }
     int fx = !backdrop && cfg.shader != 0;
     int use_scene = fx || internal;
     if (backdrop) {
@@ -763,7 +777,7 @@ static void setup_sync(void) {
 
 /* the window's client size: the chosen resolution, else the game picture at the window-size multiple */
 static void window_size_for_config(int *w, int *h) {
-    if (cfg.resolution > 0 && cfg.resolution < N_RESOLUTIONS) { *w = resolutions[cfg.resolution].w; *h = resolutions[cfg.resolution].h; return; }
+    if (cfg.res_w > 0) { *w = cfg.res_w; *h = cfg.res_h; return; }
     SDL_Rect src; source_rect(&src);
     *h = src.h * cfg.window_size;
     *w = (int)(*h * target_aspect(src.h) + 0.5);
@@ -771,6 +785,8 @@ static void window_size_for_config(int *w, int *h) {
 
 static void apply_graphics(void) {
     cfg.window_size = window_size_idx + 1;
+    if (cfg.resolution > 0 && cfg.resolution < n_res) { cfg.res_w = res_list[cfg.resolution].w; cfg.res_h = res_list[cfg.resolution].h; }
+    else { cfg.resolution = 0; cfg.res_w = cfg.res_h = 0; }
     ppu_no_sprite_limit = cfg.no_sprite_limit != 0;
     Uint32 flags = SDL_GetWindowFlags(window);
     int cur = ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
@@ -780,8 +796,8 @@ static void apply_graphics(void) {
         SDL_DisplayMode dm, want, got;
         int di = SDL_GetWindowDisplayIndex(window);
         if (SDL_GetDesktopDisplayMode(di, &dm) != 0) SDL_zero(dm);
-        if (cfg.resolution > 0 && cfg.resolution < N_RESOLUTIONS) {
-            want = dm; want.w = resolutions[cfg.resolution].w; want.h = resolutions[cfg.resolution].h;
+        if (cfg.res_w > 0) {
+            want = dm; want.w = cfg.res_w; want.h = cfg.res_h;
             if (SDL_GetClosestDisplayMode(di, &want, &got)) dm = got;
         }
         if (dm.w) SDL_SetWindowDisplayMode(window, &dm);
@@ -941,6 +957,25 @@ static void select_slot(int slot) {
     write_config();
 }
 
+/* diagnostic: --list-modes [file]: the display modes exclusive fullscreen can use */
+static void list_modes(const char *out_path) {
+    FILE *out = out_path ? nes_fopen(out_path, "w") : stdout;
+    if (!out) out = stdout;
+    for (int d = 0; d < SDL_GetNumVideoDisplays(); d++) {
+        SDL_DisplayMode m;
+        if (SDL_GetDesktopDisplayMode(d, &m) == 0) fprintf(out, "display %d (%s): desktop %dx%d @ %d Hz\n", d, SDL_GetDisplayName(d), m.w, m.h, m.refresh_rate);
+        int last_w = 0, last_h = 0;
+        for (int i = 0; i < SDL_GetNumDisplayModes(d); i++) {
+            if (SDL_GetDisplayMode(d, i, &m) != 0) continue;
+            if (m.w == last_w && m.h == last_h) { fprintf(out, " %d", m.refresh_rate); continue; }
+            fprintf(out, "%s  %dx%d @ %d", i ? "\n" : "", m.w, m.h, m.refresh_rate);
+            last_w = m.w; last_h = m.h;
+        }
+        fputs("\n", out);
+    }
+    if (out != stdout) fclose(out);
+}
+
 /* diagnostic: --list-controllers [file] (a GUI-subsystem exe cannot always print to a console) */
 static void list_controllers(const char *out_path) {
     FILE *out = out_path ? nes_fopen(out_path, "w") : stdout;
@@ -1026,7 +1061,7 @@ static int load_rom_file(const char *path) {
 /* ------------------------------------------------------------------ */
 static void refresh_controls_info(void) {
     snprintf(ctl_items[K_TOTAL + 1].info, sizeof ctl_items[K_TOTAL + 1].info,
-             "Select a row, press Enter, then press the new key or pad button.\nGamepad: %.70s\n(the left stick always works as the d-pad; Guide or LB opens this menu)",
+             "Select a row, press Enter, then press the new key or pad button.\nGamepad: %.70s (the left stick always works as the d-pad; Guide or LB opens this menu).",
              input_controller_summary());
 }
 
@@ -1039,6 +1074,17 @@ static void refresh_play_items(void) {
     else snprintf(play_items[5].info, sizeof play_items[5].info, "Slot %d: empty.   In game F6 / F7 change the slot.", cfg.state_slot);
 }
 
+/* the Graphics rows shown: all of them, minus Window size while a resolution is set (it is unused then) */
+static void layout_gfx(void) {
+    int n = 0;
+    for (int i = 0; i < GFX_ROWS; i++) {
+        if (i == GFX_WINDOW_SIZE_ROW && cfg.res_w > 0) continue;
+        gfx_items[n++] = gfx_all[i];
+    }
+    tabs[TAB_GFX].nitems = n;
+    if (tabs[TAB_GFX].sel >= n) tabs[TAB_GFX].sel = n - 1;
+}
+
 /* the Graphics tab's explanation line: the picture the current settings produce, and why it
    does not fill the output when it does not */
 static void refresh_gfx_info(void) {
@@ -1047,29 +1093,69 @@ static void refresh_gfx_info(void) {
     SDL_GetRendererOutputSize(renderer, &ww, &wh);
     int out_w = ww, out_h = wh;
     const char *where = cfg.display_mode == 2 ? "display mode" : cfg.display_mode == 1 ? "screen" : "window";
-    if (cfg.display_mode == 1 && cfg.resolution > 0 && cfg.resolution < N_RESOLUTIONS) {
-        out_w = resolutions[cfg.resolution].w; out_h = resolutions[cfg.resolution].h; where = "render size";
-    }
-    gfx_items[2].label = cfg.resolution ? "Window size (unused: resolution is set)" : "Window size";
+    if (cfg.display_mode == 1 && cfg.res_w > 0) { out_w = cfg.res_w; out_h = cfg.res_h; where = "render size"; }
     SDL_Rect src, dst;
     source_rect(&src);
     dest_rect(out_w, out_h, &src, &dst);
     int full_w = dst.w >= out_w - 1, full_h = dst.h >= out_h - 1;
     char why[300] = "";
-    if (!full_w || !full_h) {
+    if (cfg.display_mode == 2 && cfg.res_w > 0) {
+        /* exclusive fullscreen needs a real display mode of that size */
+        SDL_DisplayMode want, got;
+        SDL_zero(want);
+        want.w = cfg.res_w; want.h = cfg.res_h;
+        if (!SDL_GetClosestDisplayMode(SDL_GetWindowDisplayIndex(window), &want, &got) || got.w != want.w || got.h != want.h)
+            snprintf(why, sizeof why, "\nThis display has no %dx%d mode, so its %dx%d mode is used. Fullscreen (not exclusive) renders at the chosen size instead.",
+                     want.w, want.h, out_w, out_h);
+    }
+    if (!why[0] && (!full_w || !full_h)) {
         /* short lines: the info font has room for about 60 characters */
         double ratio = (double)out_w / out_h;
         int match = ratio > 1.7 ? 2 : ratio > 1.55 ? 3 : 1;      /* the aspect choice shaped like this output */
         if (cfg.scaling == 0 && !full_w && !full_h)
-            snprintf(why, sizeof why, "\nBorders: Integer only uses whole multiples.\nFit uses the whole height.");
+            snprintf(why, sizeof why, "\nBorders: Integer only uses whole multiples. Fit uses the whole height.");
         else if (match != cfg.aspect)
-            snprintf(why, sizeof why, "\n%s: the picture is %s than the %s.\nThe %s aspect matches its shape.",
+            snprintf(why, sizeof why, "\n%s: the picture is %s than the %s. The %s aspect matches its shape.",
                      full_w ? "Bars above and below" : "Bars at the sides", full_w ? "wider" : "taller", where, aspects[match]);
         else if (cfg.scaling == 0)
-            snprintf(why, sizeof why, "\nInteger rounds down to a whole multiple.\nFit fills the %s.", where);
+            snprintf(why, sizeof why, "\nInteger rounds down to a whole multiple. Fit fills the %s.", where);
     }
-    snprintf(gfx_items[12].info, sizeof gfx_items[12].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s",
+    snprintf(gfx_all[GFX_INFO_ROW].info, sizeof gfx_all[GFX_INFO_ROW].info, "Picture %dx%d in the %dx%d %s (%.1fx).%s",
              dst.w, dst.h, out_w, out_h, where, (double)dst.h / src.h, why);
+    layout_gfx();
+}
+
+static void add_res(int w, int h) {
+    if (w <= 0 || h <= 0 || n_res >= MAX_RES) return;
+    for (int i = 0; i < n_res; i++) if (res_list[i].w == w && res_list[i].h == h) return;
+    res_list[n_res].w = w; res_list[n_res].h = h; n_res++;
+}
+
+/* the resolution choices for this display: its own modes (from the driver), 1080p and 4K
+   always, and the saved size so it stays selectable on another display */
+static void build_res_list(int display) {
+    SDL_DisplayMode m, desk;
+    if (SDL_GetDesktopDisplayMode(display, &desk) != 0) SDL_zero(desk);
+    n_res = 0;
+    res_list[n_res].w = res_list[n_res].h = 0; n_res++;                      /* Auto */
+    for (int i = 0; i < SDL_GetNumDisplayModes(display); i++)
+        if (SDL_GetDisplayMode(display, i, &m) == 0 && m.w >= 1024 && m.h >= 600) add_res(m.w, m.h);
+    add_res(1920, 1080);
+    add_res(3840, 2160);
+    add_res(cfg.res_w, cfg.res_h);
+    for (int i = 2; i < n_res; i++)                                           /* small to large */
+        for (int j = i; j > 1 && (res_list[j].w < res_list[j - 1].w || (res_list[j].w == res_list[j - 1].w && res_list[j].h < res_list[j - 1].h)); j--) {
+            int tw = res_list[j].w, th = res_list[j].h;
+            res_list[j] = res_list[j - 1]; res_list[j - 1].w = tw; res_list[j - 1].h = th;
+        }
+    cfg.resolution = 0;
+    for (int i = 0; i < n_res; i++) {
+        if (i == 0) snprintf(res_name_buf[i], sizeof res_name_buf[i], "Auto (window size)");
+        else snprintf(res_name_buf[i], sizeof res_name_buf[i], "%dx%d%s", res_list[i].w, res_list[i].h,
+                      (res_list[i].w == desk.w && res_list[i].h == desk.h) ? " (screen)" : "");
+        res_names[i] = res_name_buf[i];
+        if (i > 0 && res_list[i].w == cfg.res_w && res_list[i].h == cfg.res_h) cfg.resolution = i;
+    }
 }
 
 static void refresh_ra_items(void) {
@@ -1083,7 +1169,7 @@ static void refresh_ra_items(void) {
 }
 
 static void refresh_rom_items(void) {
-    snprintf(rom_items[0].info, sizeof rom_items[0].info, "This program contains no game data. It needs your own\n"
+    snprintf(rom_items[0].info, sizeof rom_items[0].info, "This program contains no game data. It needs your own "
              "StarTropics (USA) cartridge dump (.nes) to run.");
     if (rom_ok) snprintf(rom_items[2].info, sizeof rom_items[2].info, "Current: %.80s (remembered for next time)\n%.150s\n%.118s",
                          rom_name, rom_status, rom_hashes);
@@ -1103,9 +1189,9 @@ static void build_menu(void) {
     p[6] = (ui_item){ "End game", UI_ACTION, ACT_STOP, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     p[7] = (ui_item){ "Quit", UI_ACTION, ACT_QUIT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
-    ui_item *g = gfx_items;
+    ui_item *g = gfx_all;
     g[0] = (ui_item){ "Display mode", UI_CHOICE, GFX_CHANGED, &cfg.display_mode, display_modes, 3, 0, 0, 0, NULL, "", NULL };
-    g[1] = (ui_item){ "Resolution", UI_CHOICE, GFX_CHANGED, &cfg.resolution, resolution_names, N_RESOLUTIONS, 0, 0, 0, NULL, "", NULL };
+    g[1] = (ui_item){ "Resolution", UI_CHOICE, GFX_CHANGED, &cfg.resolution, res_names, n_res, 0, 0, 0, NULL, "", NULL };
     g[2] = (ui_item){ "Window size", UI_CHOICE, GFX_CHANGED, &window_size_idx, window_sizes, 6, 0, 0, 0, NULL, "", NULL };
     g[3] = (ui_item){ "Scaling", UI_CHOICE, GFX_CHANGED, &cfg.scaling, scalings, 3, 0, 0, 0, NULL, "", NULL };
     g[4] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 4, 0, 0, 0, NULL, "", NULL };
@@ -1122,7 +1208,7 @@ static void build_menu(void) {
     a[0] = (ui_item){ "Volume", UI_INT, AUD_CHANGED, &cfg.volume, NULL, 0, 0, 100, 5, "%", "", NULL };
     a[1] = (ui_item){ "Latency", UI_CHOICE, LAT_CHANGED, &cfg.audio_latency, latency_names, 3, 0, 0, 0, NULL, "", NULL };
     a[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-                      "48 kHz with the NES mixer and output filters. Dynamic rate control\nholds the queue at the chosen latency; use Safe if sound stutters.", NULL };
+                      "48 kHz with the NES mixer and output filters. Dynamic rate control holds the queue at the chosen latency; use Safe if sound stutters.", NULL };
 
     static const char *const ctl_labels[K_TOTAL] = { "A (jump)", "B (attack)", "Select", "Start", "Up", "Down", "Left", "Right", "Rewind (hold)" };
     for (int i = 0; i < K_TOTAL; i++)
@@ -1130,21 +1216,21 @@ static void build_menu(void) {
     ctl_items[K_TOTAL] = (ui_item){ "Reset to defaults", UI_ACTION, ACT_KEYS_DEFAULT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-        "In game: Esc menu, Tab fast-forward, P pause, F5 / F8 save / load state, F6 / F7 slot,\nF11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
+        "In game: Esc menu, Tab fast-forward, P pause, F5 / F8 save / load state, F6 / F7 slot, F11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
     refresh_controls_info();
 
     ui_item *r = ra_items;
     if (ach_available()) {
         r[0] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-            "Unlock RetroAchievements while you play: each one pops up in game.\n"
-            "You need a free account at retroachievements.org. Only a session\ntoken is kept here, never the password.", NULL };
+            "Unlock RetroAchievements while you play: each one pops up in game. You need a free account at "
+            "retroachievements.org. Only a session token is kept here, never the password.", NULL };
         r[1] = (ui_item){ "User name", UI_TEXT, RA_TEXT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL, ra_user_buf, sizeof ra_user_buf, 0 };
         r[2] = (ui_item){ "Password", UI_TEXT, RA_TEXT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL, ra_pass_buf, sizeof ra_pass_buf, 1 };
         r[3] = (ui_item){ "Log in", UI_ACTION, ACT_RA_LOGIN, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
         r[4] = (ui_item){ "Hardcore mode", UI_CHOICE, RA_CHANGED, &cfg.ra_hardcore, onoff, 2, 0, 0, 0, NULL, "", NULL };
         r[5] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
         r[6] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-            "Hardcore mode: no save state loading and no rewind, so unlocks count\non the hardcore boards. Switching it resets the game.", NULL };
+            "Hardcore mode: no save state loading and no rewind, so unlocks count on the hardcore boards. Switching it resets the game.", NULL };
     } else {
         r[0] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
         snprintf(r[0].info, sizeof r[0].info, "%s", ach_status());
@@ -1155,7 +1241,7 @@ static void build_menu(void) {
     rom_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     tabs[TAB_PLAY] = (ui_tab){ "Play", play_items, 8, 0 };
-    tabs[TAB_GFX] = (ui_tab){ "Graphics", gfx_items, 13, 0 };
+    tabs[TAB_GFX] = (ui_tab){ "Graphics", gfx_items, GFX_ROWS, 0 };
     tabs[TAB_AUDIO] = (ui_tab){ "Audio", aud_items, 3, 0 };
     tabs[TAB_CONTROLS] = (ui_tab){ "Controls", ctl_items, K_TOTAL + 3, 0 };
     tabs[TAB_RA] = (ui_tab){ "Achievements", ra_items, ach_available() ? 7 : 1, 0 };
@@ -1164,7 +1250,7 @@ static void build_menu(void) {
     menu.tabs = tabs; menu.ntabs = N_TABS;
     menu.title = "STARTROPICS";
     menu.subtitle = "native port";
-    menu.hint = "Arrows: navigate   Enter: select   Esc: back / resume   Drop a .nes file here to load it";
+    menu.hint = "Arrows / Enter / Esc to navigate   Drop a .nes file here to load it";
     menu.hover_tab = menu.hover_item = -1;
     refresh_rom_items();
     refresh_ra_items();
@@ -1245,11 +1331,14 @@ static void draw_menu(void) {
     SDL_SetRenderDrawColor(renderer, 14, 18, 22, 255);
     SDL_RenderClear(renderer);
     int have_backdrop = 0;
-    if (bg_tex) { draw_backdrop_image(); have_backdrop = 1; }
-    else if (rom_ok) { draw_game_ex(!game_started); have_backdrop = 1; }
+    /* on the Graphics tab the backdrop is the picture as the current settings draw it (scaling,
+       aspect, filter, shader), lightly dimmed, so a change can be judged while cycling through it */
+    int preview = rom_ok && menu.tab == TAB_GFX;
+    if (bg_tex && !preview) { draw_backdrop_image(); have_backdrop = 1; }
+    else if (rom_ok) { draw_game_ex(!game_started && !preview); have_backdrop = 1; }
     if (have_backdrop) {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(renderer, 8, 12, 16, game_started ? 185 : 105);
+        SDL_SetRenderDrawColor(renderer, 8, 12, 16, preview ? 50 : game_started ? 185 : 105);
         SDL_Rect all = { 0, 0, ww, wh };
         SDL_RenderFillRect(renderer, &all);
     }
@@ -1270,7 +1359,8 @@ static void fatal_box(const char *msg) {
 
 static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
-           "                   [--game-shot out.png [frames]] [--rewind-test N] [--list-controllers [out.txt]] [--stats out.txt]\n");
+           "                   [--game-shot out.png [frames]] [--rewind-test N] [--list-controllers [out.txt]]\n"
+           "                   [--list-modes [out.txt]] [--stats out.txt]\n");
 }
 
 static uint64_t fb_hash(void) {
@@ -1320,6 +1410,8 @@ int main(int argc, char **argv) {
 #endif
     const char *rom_arg = NULL, *selftest_png = NULL, *uishot_png = NULL, *gameshot_png = NULL, *list_pads_file = NULL, *stats_path = NULL;
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
+    const char *list_modes_file = NULL;
+    int list_modes_flag = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest") && i + 2 < argc) { selftest_frames = atoi(argv[i + 1]); selftest_png = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--ui-shot") && i + 1 < argc) {
@@ -1334,6 +1426,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--rewind-test") && i + 1 < argc) rewind_test = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (!strcmp(argv[i], "--list-controllers")) { list_pads = 1; if (i + 1 < argc) list_pads_file = argv[++i]; }
+        else if (!strcmp(argv[i], "--list-modes")) { list_modes_flag = 1; if (i + 1 < argc) list_modes_file = argv[++i]; }
         else if (!strcmp(argv[i], "--stats") && i + 1 < argc) stats_path = argv[++i];
         else if (!strcmp(argv[i], "--play")) autoplay = 1;
         else rom_arg = argv[i];
@@ -1352,6 +1445,7 @@ int main(int argc, char **argv) {
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) fprintf(stderr, "audio unavailable: %s\n", SDL_GetError());
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) fprintf(stderr, "game controllers unavailable: %s\n", SDL_GetError());
     if (list_pads) { list_controllers(list_pads_file); SDL_Quit(); return 0; }
+    if (list_modes_flag) { list_modes(list_modes_file); SDL_Quit(); return 0; }
 
     char *bp = SDL_GetBasePath();
     snprintf(base_dir, sizeof base_dir, "%s", bp ? bp : "./");
@@ -1406,6 +1500,7 @@ int main(int argc, char **argv) {
     load_backdrop();
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
     input_init();
+    build_res_list(SDL_GetWindowDisplayIndex(window));
     build_menu();
     update_title();
 
@@ -1438,7 +1533,7 @@ int main(int argc, char **argv) {
         draw_game(); draw_overlays(1);
         int rc = write_window_png(gameshot_png);
         printf("game-shot: %s -> %s (shader %s, resolution %s, display mode %d)\n", rc == 0 ? "wrote" : "FAILED", gameshot_png,
-               shader_names[cfg.shader], resolution_names[cfg.resolution], cfg.display_mode);
+               shader_names[cfg.shader], res_names[cfg.resolution], cfg.display_mode);
         font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
         return rc == 0 ? 0 : 1;
     }

@@ -159,20 +159,22 @@ the Deck: `docs/STEAMDECK.md`.
 
 ### Android
 
-`android/build_apk.py` builds `dist/startropics-android.apk` straight from the Android
-SDK tools (no Gradle): SDL2's Java glue and native library from the SDL source (fetched
+`android/build_apk.py` builds two APKs straight from the Android SDK tools (no Gradle):
+`dist/startropics-android-handheld.apk` for gaming handhelds with built-in controls and
+`dist/startropics-android-phone.apk` for phones, the same app with a translucent on-screen
+controller (`frontend/touchpad.c`) under its own name ("StarTropics Touch"). They hold SDL2's Java glue and native library from the SDL source (fetched
 once), the game as `libmain.so` for arm64-v8a and x86_64 (NDK + CMake), a small activity
 for the system file picker and for RetroAchievements' HTTP, and launcher icons drawn from
-the port's own artwork. It needs a platform 34+, build-tools, an NDK and CMake from the SDK
+the port's own artwork; the phone edition differs only in its manifest. It needs a platform 34+, build-tools, an NDK and CMake from the SDK
 manager, plus a JDK; the APK is signed with a key kept in
 `~/.android/startropics-release.keystore` (created on first use).
 
 ```
-python android/build_apk.py              # after make recomp
-python android/build_apk.py --install    # and adb install it
+python android/build_apk.py                           # after make recomp
+python android/build_apk.py --edition phone --install # one of them, and adb install it
 ```
 
-Player notes for handhelds: `docs/ANDROID.md`.
+Player notes for handhelds and phones: `docs/ANDROID.md`.
 
 ### Controls
 

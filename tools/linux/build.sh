@@ -21,6 +21,7 @@ if [ -n "$ROM" ]; then
         echo "== $b self-tests"
         ./$b/startropics "$ROM" --selftest 300 "/tmp/st-$b.png" | grep selftest
         ./$b/startropics --trigger-test | tail -n 1
+        ./$b/startropics --touch-test | tail -n 1
         ./$b/startropics "$ROM" --chord-test | tail -n 1
         ./$b/startropics "$ROM" --rewind-test 1200 | grep rewind-test
         ./$b/startropics "$ROM" --ui-shot "/tmp/ui-$b.png" 1 60 | grep ui-shot

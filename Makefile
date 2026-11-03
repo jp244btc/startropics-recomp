@@ -61,7 +61,7 @@ ifeq ($(DECK_EDITION),1)
   PLATFORM := steamdeck
 endif
 
-FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c frontend/touchpad.c
 
 # ---- RetroAchievements (optional): third_party/rcheevos.mk defines RCHEEVOS_SRC / RCHEEVOS_CFLAGS /
 #      RCHEEVOS_LIBS when the MIT-licensed rcheevos library is vendored; frontend/achievements.c uses it.
@@ -131,7 +131,7 @@ $(BUILD)/rc/$(notdir $(basename $(1))).o: $(1)
 endef
 $(foreach src,$(RCHEEVOS_SRC),$(eval $(call RC_RULE,$(src))))
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h frontend/touchpad.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(RCHEEVOS_CFLAGS) -Iruntime -c $< -o $@
 

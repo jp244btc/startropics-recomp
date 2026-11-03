@@ -1,6 +1,8 @@
 package org.startropics.nativeport;
 
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -63,15 +65,17 @@ public class StarTropicsActivity extends SDLActivity {
         }
     }
 
-    /* Command-line options for tests and diagnostics (for example --stats and an absolute file
-       path, one per line) can be put in Android/data/org.startropics.nativeport/files/args.txt,
-       a folder only adb and the app itself can write to. */
+    /* The phone edition (manifest meta-data org.startropics.touch) gets the on-screen controls.
+       Command-line options for tests and diagnostics (for example --stats and an absolute file
+       path, one per line) can be put in Android/data/<package>/files/args.txt, a folder only adb
+       and the app itself can write to. */
     @Override
     protected String[] getArguments() {
+        ArrayList<String> args = new ArrayList<>();
+        if (touchEdition()) args.add("--touch");
         File dir = getExternalFilesDir(null);
         File f = dir != null ? new File(dir, "args.txt") : null;
-        if (f == null || !f.isFile()) return new String[0];
-        ArrayList<String> args = new ArrayList<>();
+        if (f == null || !f.isFile()) return args.toArray(new String[0]);
         try (BufferedReader r = new BufferedReader(new FileReader(f))) {
             String line;
             while ((line = r.readLine()) != null) {
@@ -79,9 +83,18 @@ public class StarTropicsActivity extends SDLActivity {
                 if (!line.isEmpty()) args.add(line);
             }
         } catch (IOException e) {
-            return new String[0];
+            /* the options read so far */
         }
         return args.toArray(new String[0]);
+    }
+
+    private boolean touchEdition() {
+        try {
+            ApplicationInfo ai = getPackageManager().getApplicationInfo(getPackageName(), PackageManager.GET_META_DATA);
+            return ai.metaData != null && ai.metaData.getBoolean("org.startropics.touch", false);
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
+        }
     }
     private static final int PICK_ROM = 0x5754;
 

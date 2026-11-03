@@ -22,7 +22,7 @@ if(NOT GEN_SRC)
   message(FATAL_ERROR "no generated code: run 'make recomp' with your ROM first")
 endif()
 set(FRONTEND_SRC)
-foreach(f sdl_main font ui filedialog audio_out input gpu_sync icon_data rewind achievements)
+foreach(f sdl_main font ui filedialog audio_out input gpu_sync icon_data rewind achievements touchpad)
   list(APPEND FRONTEND_SRC ${ROOT}/frontend/${f}.c)
 endforeach()
 file(GLOB RC_SRC

@@ -3,12 +3,16 @@
 
 Needs: the Android SDK with a platform >= 34, build-tools, an NDK and CMake (all from the SDK
 manager), a JDK (javac, keytool), and generated/ (make recomp with your own ROM). Downloads the
-SDL2 source once (its Java glue and native library). Output: dist/startropics-android.apk (arm64
-for the handhelds and phones, x86_64 for emulators and Chromebooks),
+SDL2 source once (its Java glue and native library). Output, both with arm64 (handhelds and
+phones) and x86_64 (emulators, Chromebooks):
+  dist/startropics-android-handheld.apk  for gaming handhelds with built-in controls
+  dist/startropics-android-phone.apk     for phones: a translucent on-screen controller; its own
+                                         app ("StarTropics Touch"), so both can be installed
 signed with a key kept in ~/.android/startropics-release.keystore (made on first use; keep it,
 an installed app can only be updated with the same key).
 
-usage: python android/build_apk.py [--sdk DIR] [--jdk DIR] [--abi arm64-v8a,x86_64] [--install [SERIAL]]
+usage: python android/build_apk.py [--sdk DIR] [--jdk DIR] [--abi arm64-v8a,x86_64]
+                                   [--edition handheld,phone] [--install [SERIAL]]
 """
 import argparse
 import glob
@@ -30,7 +34,13 @@ ABIS = ["arm64-v8a", "x86_64"]
 MIN_SDK = 24
 TARGET_SDK = 34
 EXE = ".exe" if os.name == "nt" else ""
-OUT_APK = os.path.join(ROOT, "dist", "startropics-android.apk")
+PACKAGE = "org.startropics.nativeport"
+# the phone edition is the same app with the on-screen controls (manifest meta-data, read by
+# StarTropicsActivity) under its own package name and label
+EDITIONS = {
+    "handheld": {"apk": "startropics-android-handheld.apk", "package": PACKAGE, "label": "StarTropics", "touch": False},
+    "phone": {"apk": "startropics-android-phone.apk", "package": PACKAGE + ".touch", "label": "StarTropics Touch", "touch": True},
+}
 KEYSTORE = os.path.join(os.path.expanduser("~"), ".android", "startropics-release.keystore")
 KEY_ALIAS, KEY_PASS = "startropics", "startropics"
 
@@ -169,14 +179,33 @@ def version():
     return count, "1.0.%d-%s" % (count, short)
 
 
-def package(t, libs, dex, res):
+def edition_manifest(edition):
+    """AndroidManifest.xml with the edition's label, and for the phone edition the meta-data that turns
+    the on-screen controls on"""
+    e = EDITIONS[edition]
+    with open(os.path.join(HERE, "AndroidManifest.xml"), encoding="utf-8") as f:
+        m = f.read()
+    if m.count('android:label="StarTropics"') != 2 or m.count("        <activity\n") != 1:
+        raise SystemExit("AndroidManifest.xml: labels or activity not where expected")
+    m = m.replace('android:label="StarTropics"', 'android:label="%s"' % e["label"])
+    if e["touch"]:
+        m = m.replace("        <activity\n", '        <meta-data android:name="org.startropics.touch" android:value="true" />\n\n        <activity\n')
+    out = os.path.join(BUILD, "AndroidManifest-%s.xml" % edition)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(m)
+    return out
+
+
+def package(t, libs, dex, res, edition):
+    e = EDITIONS[edition]
     code, name = version()
     flat = os.path.join(BUILD, "res.zip")
     run([t["aapt2"], "compile", "--dir", res, "-o", flat])
     unaligned = os.path.join(BUILD, "unaligned.apk")
-    run([t["aapt2"], "link", "-o", unaligned, "-I", t["android_jar"], "--manifest", os.path.join(HERE, "AndroidManifest.xml"),
+    rename = ["--rename-manifest-package", e["package"]] if e["package"] != PACKAGE else []
+    run([t["aapt2"], "link", "-o", unaligned, "-I", t["android_jar"], "--manifest", edition_manifest(edition),
          "--min-sdk-version", str(MIN_SDK), "--target-sdk-version", str(TARGET_SDK),
-         "--version-code", str(code), "--version-name", name, "--auto-add-overlay", flat])
+         "--version-code", str(code), "--version-name", name, "--auto-add-overlay"] + rename + [flat])
     with zipfile.ZipFile(unaligned, "a", zipfile.ZIP_DEFLATED) as z:
         z.write(dex, "classes.dex")
         for arcname, path in libs.items():
@@ -187,11 +216,13 @@ def package(t, libs, dex, res):
         os.makedirs(os.path.dirname(KEYSTORE), exist_ok=True)
         run([t["keytool"], "-genkeypair", "-keystore", KEYSTORE, "-alias", KEY_ALIAS, "-keyalg", "RSA", "-keysize", "2048",
              "-validity", "10000", "-storepass", KEY_PASS, "-keypass", KEY_PASS, "-dname", "CN=StarTropics native port"])
-    os.makedirs(os.path.dirname(OUT_APK), exist_ok=True)
+    out_apk = os.path.join(ROOT, "dist", e["apk"])
+    os.makedirs(os.path.dirname(out_apk), exist_ok=True)
     run([t["java"], "-jar", t["apksigner"], "sign", "--ks", KEYSTORE, "--ks-key-alias", KEY_ALIAS,
-         "--ks-pass", "pass:" + KEY_PASS, "--key-pass", "pass:" + KEY_PASS, "--out", OUT_APK, aligned])
-    run([t["java"], "-jar", t["apksigner"], "verify", OUT_APK])
-    print("apk: %s (version %s, %d bytes)" % (OUT_APK, name, os.path.getsize(OUT_APK)), flush=True)
+         "--ks-pass", "pass:" + KEY_PASS, "--key-pass", "pass:" + KEY_PASS, "--out", out_apk, aligned])
+    run([t["java"], "-jar", t["apksigner"], "verify", out_apk])
+    print("apk: %s (%s, %s, version %s, %d bytes)" % (out_apk, e["label"], e["package"], name, os.path.getsize(out_apk)), flush=True)
+    return out_apk
 
 
 def main():
@@ -199,8 +230,13 @@ def main():
     ap.add_argument("--sdk")
     ap.add_argument("--jdk")
     ap.add_argument("--abi", default=",".join(ABIS), help="comma-separated ABIs (default: %(default)s)")
+    ap.add_argument("--edition", default=",".join(EDITIONS), help="comma-separated editions (default: %(default)s)")
     ap.add_argument("--install", nargs="?", const="", metavar="SERIAL", help="adb install afterwards (optionally to one device)")
     args = ap.parse_args()
+    editions = [x.strip() for x in args.edition.split(",") if x.strip()]
+    for x in editions:
+        if x not in EDITIONS:
+            raise SystemExit("unknown edition %s (handheld, phone)" % x)
     if not glob.glob(os.path.join(ROOT, "generated", "*.c")):
         raise SystemExit("no generated code: run 'make recomp' with your ROM first")
     t = find_tools(args)
@@ -210,10 +246,10 @@ def main():
         libs.update(build_native(t, sdl, abi.strip()))
     dex = build_java(t, sdl)
     res = build_icons()
-    package(t, libs, dex, res)
+    apks = [package(t, libs, dex, res, x) for x in editions]
     if args.install is not None:
-        cmd = [t["adb"]] + (["-s", args.install] if args.install else []) + ["install", "-r", OUT_APK]
-        run(cmd)
+        for apk in apks:
+            run([t["adb"]] + (["-s", args.install] if args.install else []) + ["install", "-r", apk])
 
 
 if __name__ == "__main__":

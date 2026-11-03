@@ -40,6 +40,7 @@
 #include "widescreen.h"
 #include "rewind.h"
 #include "achievements.h"
+#include "touchpad.h"
 #include <stdarg.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -836,9 +837,10 @@ static void draw_overlays(int show_osd) {
     int mg = 6 * s;
     const SDL_Color text_c = { 232, 238, 242, 255 }, gold = { 240, 190, 60, 255 };
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    if (show_osd) touchpad_draw(renderer, ww, wh);
     if (show_osd && SDL_GetTicks64() < osd_until) {
         int w = font_width(osd_text, s) + 2 * mg + 3 * s, h = FONT_CELL_H * s + 2 * mg;
-        SDL_Rect rc = { mg, wh - h - mg, w, h };
+        SDL_Rect rc = { mg, touchpad_visible() ? mg : wh - h - mg, w, h };   /* above the d-pad on a phone */
         SDL_SetRenderDrawColor(renderer, 10, 14, 18, 200);
         SDL_RenderFillRect(renderer, &rc);
         SDL_Rect bar = { rc.x, rc.y, 2 * s, rc.h };
@@ -1063,7 +1065,9 @@ static int pad_override = -1;    /* tests: the pad to use instead of the keyboar
 /* the timeline was replaced (state load, rewind, reset, power): the kept states are stale */
 static void chord_clear(void) { chord_count = 0; }
 
-static uint8_t raw_pad(void) { return pad_override >= 0 ? (uint8_t)pad_override : input_read(cfg.key, cfg.pad); }
+static uint8_t raw_pad(void) {
+    return pad_override >= 0 ? (uint8_t)pad_override : (uint8_t)(input_read(cfg.key, cfg.pad) | touchpad_buttons());
+}
 
 /* the NES pad as the game should see it */
 static uint8_t game_pad(void) {
@@ -1562,7 +1566,11 @@ static void build_menu(void) {
     ctl_items[K_TOTAL + 2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
         "Menu: Start + Select together, Esc, Guide or LB. Fast-forward within 1.5 s after a rewind goes forward again to where it began. "
         "P pause, F5 / F8 save / load, F6 / F7 slot, F11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
-    if (handheld)
+    if (touchpad_enabled())
+        snprintf(ctl_items[K_TOTAL + 2].info, sizeof ctl_items[K_TOTAL + 2].info, "%s",
+                 "On the screen: d-pad, B, A, Select, Start, and MENU for this menu (Back works too). "
+                 "A controller can be used as well: the screen's controls step aside until you touch it again.");
+    else if (handheld)
         snprintf(ctl_items[K_TOTAL + 2].info, sizeof ctl_items[K_TOTAL + 2].info, "%s",
                  "Menu: LT + RT together (also Start + Select, LB or Guide). "
                  "Fast-forward within 1.5 s after a rewind goes forward again to where it began.");
@@ -1599,7 +1607,8 @@ static void build_menu(void) {
     menu.tabs = tabs; menu.ntabs = N_TABS;
     menu.title = "STARTROPICS";
     menu.subtitle = "native port";
-    if (handheld) menu.hint = "D-pad, A to choose, B back.   In game: LT + RT opens this menu";
+    if (touchpad_enabled()) menu.hint = "Tap to choose.   In game: MENU at the top opens this menu";
+    else if (handheld) menu.hint = "D-pad, A to choose, B back.   In game: LT + RT opens this menu";
     else menu.hint = "Arrows / Enter / Esc to navigate   Drop a .nes file here to load it";
     menu.hover_tab = menu.hover_item = -1;
     refresh_rom_items();
@@ -1609,6 +1618,7 @@ static void build_menu(void) {
 
 static void open_menu(void) {
     state = ST_MENU;
+    touchpad_release_all();
     menu.tab = 0; menu.focus = 1; menu.capture = 0;
     ui_select_first(&menu);
     refresh_rom_items();
@@ -1877,7 +1887,8 @@ static int trigger_selftest(void) {
 static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
            "                   [--game-shot out.png [frames] [--state-load state]] [--rewind-test N] [--list-controllers [out.txt]]\n"
-           "                   [--list-modes [out.txt]] [--chord-test] [--trigger-test] [--stats out.txt]\n");
+           "                   [--list-modes [out.txt]] [--chord-test] [--trigger-test] [--stats out.txt]\n"
+           "                   [--touch] [--touch-test]\n");
 }
 
 static uint64_t fb_hash(void) {
@@ -1969,7 +1980,7 @@ int main(int argc, char **argv) {
     const char *shot_state = NULL;
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
     const char *list_modes_file = NULL;
-    int list_modes_flag = 0, chord_test = 0;
+    int list_modes_flag = 0, chord_test = 0, touch_flag = 0, touch_test = 0;
 #if !defined(_WIN32) && !defined(__ANDROID__)
     /* diagnostics on Linux, where a Steam shortcut has no easy command line: when started
        without options, those in args.txt next to the program (one per line) are used */
@@ -2013,6 +2024,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--rewind-test") && i + 1 < argc) rewind_test = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chord-test")) chord_test = 1;
         else if (!strcmp(argv[i], "--trigger-test")) trigger_test_flag = 1;
+        else if (!strcmp(argv[i], "--touch")) touch_flag = 1;   /* the phone edition: on-screen controls */
+        else if (!strcmp(argv[i], "--touch-test")) touch_test = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (!strcmp(argv[i], "--list-controllers")) { list_pads = 1; if (i + 1 < argc) list_pads_file = argv[++i]; }
         else if (!strcmp(argv[i], "--list-modes")) { list_modes_flag = 1; if (i + 1 < argc) list_modes_file = argv[++i]; }
@@ -2125,6 +2138,7 @@ int main(int argc, char **argv) {
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
     input_init();
     build_res_list(SDL_GetWindowDisplayIndex(window));
+    touchpad_enable(touch_flag);
     build_menu();
     update_title();
 
@@ -2144,6 +2158,11 @@ int main(int argc, char **argv) {
     ui_select_first(&menu);
 
     /* ---- self tests ---- */
+    if (touch_test) {
+        int rc = touchpad_selftest();
+        font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
+        return rc;
+    }
     if (trigger_test_flag) {
         int rc = trigger_selftest();
         font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
@@ -2321,6 +2340,11 @@ int main(int argc, char **argv) {
                 input_handle_event(&ev);
                 refresh_controls_info();
                 continue;
+            }
+            if (touchpad_enabled()) {   /* the phone edition's on-screen controls */
+                int ow, oh;
+                SDL_GetRendererOutputSize(renderer, &ow, &oh);
+                if (touchpad_handle_event(&ev, ow, oh, state == ST_GAME) && state == ST_GAME) { open_menu(); continue; }
             }
             if (state == ST_MENU) {
                 if (ev.type == SDL_KEYDOWN && !menu.capture && ev.key.keysym.sym == SDLK_F11) { toggle_fullscreen(); continue; }

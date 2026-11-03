@@ -162,6 +162,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     const char *rom = NULL, *png = NULL, *wav = NULL, *trace = NULL, *cov = NULL, *hash = NULL, *sav = NULL, *input = NULL, *debug_log = NULL, *ram_dump = NULL, *wide = NULL;
+    const char *state_save = NULL, *state_load = NULL;
     int frames = 600, png_every = 0, ram_dump_every = 0, nestest = 0, blargg = 0, recomp = 0, quiet = 0, trace_start = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
@@ -179,6 +180,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--recomp")) recomp = 1;
         else if (!strcmp(argv[i], "--frame-hash") && i + 1 < argc) hash = argv[++i];
         else if (!strcmp(argv[i], "--sav") && i + 1 < argc) sav = argv[++i];
+        else if (!strcmp(argv[i], "--state-save") && i + 1 < argc) state_save = argv[++i];
+        else if (!strcmp(argv[i], "--state-load") && i + 1 < argc) state_load = argv[++i];
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--watch") && i + 1 < argc) watch_addr = (int)strtol(argv[++i], NULL, 16);
         else if (!strcmp(argv[i], "--trace-start") && i + 1 < argc) trace_start = atoi(argv[++i]);
@@ -192,6 +195,16 @@ int main(int argc, char **argv) {
     apu_set_sample_rate(48000);
     if (nes_load(rom) != 0) return 1;
     if (sav) cart_load_battery(sav);
+    if (state_load) {
+        size_t len = nes_state_size();
+        void *buf = malloc(len);
+        FILE *f = nes_fopen(state_load, "rb");
+        size_t n = f ? fread(buf, 1, len, f) : 0;
+        if (f) fclose(f);
+        if (n != len || nes_state_load(buf, len) != 0) { fprintf(stderr, "cannot load state %s\n", state_load); return 1; }
+        free(buf);
+        if (!quiet) printf("state loaded from %s (cpu cycle %llu)\n", state_load, (unsigned long long)cpu.cycles);
+    }
     nes_palette_build(pal);
     if (input) load_input_script(input);
 
@@ -314,6 +327,16 @@ int main(int argc, char **argv) {
         if (f) { fwrite(sys.cov, 1, cart.prg_size + 0x8000, f); fclose(f); }
     }
     if (sav) cart_save_battery(sav);
+    if (state_save) {
+        size_t len = nes_state_size();
+        void *buf = malloc(len);
+        FILE *f = nes_fopen(state_save, "wb");
+        if (!f || nes_state_save(buf, len) != 0) { fprintf(stderr, "cannot save state %s\n", state_save); return 1; }
+        fwrite(buf, 1, len, f);
+        fclose(f);
+        free(buf);
+        if (!quiet) printf("state saved to %s (%zu bytes, cpu cycle %llu)\n", state_save, len, (unsigned long long)cpu.cycles);
+    }
     if (sys.debug_log) fclose((FILE *)sys.debug_log);
     if (ram_dump) {
         FILE *f = fopen(ram_dump, "wb");

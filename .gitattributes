@@ -6,6 +6,11 @@ Makefile text eol=lf
 *.c text eol=lf
 *.h text eol=lf
 *.md text eol=lf
+*.mk text eol=lf
+Dockerfile text eol=lf
+CMakeLists.txt text eol=lf
+*.java text eol=lf
+*.xml text eol=lf
 *.nes binary
 *.sav binary
 *.state binary

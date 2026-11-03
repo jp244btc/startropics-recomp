@@ -114,6 +114,42 @@ int main(int argc, char **argv) {
         CHECK(e.type == UI_EV_ACTIVATE && e.id == 22, "the action row below still activates");
     }
 
+    /* 9b. a trigger binds like a button and its name round-trips through the ini format */
+    {
+        int k2 = SDLK_TAB, p2 = -1;
+        ui_item titem[1];
+        memset(titem, 0, sizeof titem);
+        titem[0] = (ui_item){ "Fast-forward (hold)", UI_KEY, 41, &k2, NULL, 0, 0, 0, 0, NULL, "", &p2 };
+        ui_tab ttab2 = { "Controls", titem, 1, 0 };
+        ui_menu tm2; memset(&tm2, 0, sizeof tm2);
+        tm2.tabs = &ttab2; tm2.ntabs = 1; tm2.focus = 1; tm2.hover_tab = tm2.hover_item = -1;
+        key(&tm2, SDLK_RETURN, 0);
+        SDL_Event ax; memset(&ax, 0, sizeof ax);
+        ax.type = SDL_CONTROLLERAXISMOTION; ax.caxis.axis = SDL_CONTROLLER_AXIS_TRIGGERRIGHT; ax.caxis.value = 3000;
+        e = ui_handle_event(&tm2, &ax);
+        CHECK(e.type == UI_EV_NONE && tm2.capture == 1, "a lightly touched trigger does not bind");
+        ax.caxis.value = 30000;
+        e = ui_handle_event(&tm2, &ax);
+        CHECK(e.type == UI_EV_CHANGED && p2 == INPUT_PAD_RT && k2 == SDLK_TAB && tm2.capture == 0, "pulling RT binds the right trigger");
+        CHECK(strcmp(input_pad_name(INPUT_PAD_RT), "RT") == 0 && input_pad_from_name("lt") == INPUT_PAD_LT, "trigger names: RT and LT");
+    }
+
+    /* 10. an auto-repeated Enter (held since before the menu opened) activates nothing; a fresh press does */
+    {
+        ui_item aitems[1];
+        memset(aitems, 0, sizeof aitems);
+        aitems[0] = (ui_item){ "Resume game", UI_ACTION, 31, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+        ui_tab atab = { "Play", aitems, 1, 0 };
+        ui_menu am; memset(&am, 0, sizeof am);
+        am.tabs = &atab; am.ntabs = 1; am.focus = 1; am.hover_tab = am.hover_item = -1;
+        e = key(&am, SDLK_RETURN, 1);
+        CHECK(e.type == UI_EV_NONE, "a repeated Enter does not resume the game");
+        e = key(&am, SDLK_ESCAPE, 1);
+        CHECK(e.type == UI_EV_NONE && am.focus == 1, "a repeated Escape does not leave the item list");
+        e = key(&am, SDLK_RETURN, 0);
+        CHECK(e.type == UI_EV_ACTIVATE && e.id == 31, "a fresh Enter press still activates");
+    }
+
     printf("%s (%d failure%s)\n", failures ? "UI BINDING TEST FAILED" : "UI BINDING TEST PASSED", failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

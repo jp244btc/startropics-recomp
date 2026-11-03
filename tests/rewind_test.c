@@ -80,7 +80,31 @@ int main(void) {
     for (int k = 38; k >= 39 - n; k--) if (!rewind_pop(tmp) || memcmp(tmp, hist[k], N) != 0) { ok = 0; break; }
     CHECK(ok && n > 10, "all-bytes-change records round-trip");
 
-    /* 5. clear forgets everything */
+    /* 5. forward again: pop k, redo k gives the newer states back exactly; a push forgets the rest */
+    rewind_shutdown();
+    CHECK(rewind_init(N, 4u << 20), "init for the forward-again tests");
+    for (int i = 0; i < N; i++) hist[0][i] = (uint8_t)rnd();
+    rewind_push(hist[0]);
+    for (int k = 1; k < 60; k++) { memcpy(hist[k], hist[k - 1], N); mutate(hist[k], 200); rewind_push(hist[k]); }
+    for (int k = 58; k >= 30; k--) rewind_pop(tmp);                 /* back to state 30 */
+    CHECK(memcmp(tmp, hist[30], N) == 0 && rewind_redo_count() == 29, "29 steps back to state 30, all 29 can be undone");
+    ok = 1;
+    for (int k = 31; k <= 50; k++) if (!rewind_redo(tmp) || memcmp(tmp, hist[k], N) != 0) { ok = 0; printf("      forward mismatch at %d\n", k); break; }
+    CHECK(ok && rewind_redo_count() == 9 && rewind_count() == 50, "forward again through states 31-50, exact");
+    rewind_pop(tmp); rewind_pop(tmp);                                /* back to 48, 11 can be undone */
+    CHECK(memcmp(tmp, hist[48], N) == 0 && rewind_redo_count() == 11, "stepping back again in the middle keeps the rest");
+    for (int k = 49; k <= 59; k++) rewind_redo(tmp);
+    CHECK(memcmp(tmp, hist[59], N) == 0 && rewind_redo(tmp) == 0 && rewind_redo_count() == 0, "forward stops at the newest state");
+    for (int k = 58; k >= 40; k--) rewind_pop(tmp);
+    memcpy(tmp, hist[40], N); mutate(tmp, 77);
+    rewind_push(tmp);                                                /* play on from state 40: a new branch */
+    CHECK(rewind_redo_count() == 0 && rewind_redo(tmp) == 0, "a push forgets the stretch that was stepped back over");
+    rewind_pop(tmp);
+    CHECK(memcmp(tmp, hist[40], N) == 0, "and stepping back from the branch reaches state 40");
+    for (int k = 39; k >= 0; k--) rewind_pop(tmp);
+    CHECK(memcmp(tmp, hist[0], N) == 0 && rewind_count() == 0, "the history under the branch is intact");
+
+    /* 6. clear forgets everything */
     rewind_push(hist[0]); rewind_push(hist[1]);
     rewind_clear();
     CHECK(rewind_count() == 0 && rewind_pop(tmp) == 0, "clear empties the history");

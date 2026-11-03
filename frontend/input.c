@@ -94,6 +94,14 @@ void input_handle_event(const SDL_Event *e) {
     }
 }
 
+#define TRIGGER_DOWN 16000   /* of 32767 */
+
+static int pad_button_down(SDL_GameController *c, int b) {
+    if (b == INPUT_PAD_LT) return SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > TRIGGER_DOWN;
+    if (b == INPUT_PAD_RT) return SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > TRIGGER_DOWN;
+    return b >= 0 && b < SDL_CONTROLLER_BUTTON_MAX && SDL_GameControllerGetButton(c, (SDL_GameControllerButton)b);
+}
+
 uint8_t input_read(const int key[NES_BUTTONS], const int pad[NES_BUTTONS]) {
     const int dead = 10000;
     uint8_t b = 0;
@@ -105,8 +113,7 @@ uint8_t input_read(const int key[NES_BUTTONS], const int pad[NES_BUTTONS]) {
     for (int p = 0; p < npads; p++) {
         SDL_GameController *c = pads[p];
         for (int i = 0; i < NES_BUTTONS; i++)
-            if (pad[i] >= 0 && pad[i] < SDL_CONTROLLER_BUTTON_MAX && SDL_GameControllerGetButton(c, (SDL_GameControllerButton)pad[i]))
-                b |= (uint8_t)(1 << i);
+            if (pad_button_down(c, pad[i])) b |= (uint8_t)(1 << i);
         int ax = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
         int ay = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
         if (ax < -dead) b |= 0x40; else if (ax > dead) b |= 0x80;
@@ -141,8 +148,7 @@ int input_held(int key, int pad) {
     const Uint8 *ks = SDL_GetKeyboardState(NULL);
     SDL_Scancode sc = SDL_GetScancodeFromKey((SDL_Keycode)key);
     if (sc != SDL_SCANCODE_UNKNOWN && ks[sc]) return 1;
-    if (pad >= 0 && pad < SDL_CONTROLLER_BUTTON_MAX)
-        for (int p = 0; p < npads; p++) if (SDL_GameControllerGetButton(pads[p], (SDL_GameControllerButton)pad)) return 1;
+    for (int p = 0; p < npads; p++) if (pad_button_down(pads[p], pad)) return 1;
     return 0;
 }
 
@@ -168,6 +174,7 @@ static const struct { int button; const char *name; } pad_names[] = {
     { SDL_CONTROLLER_BUTTON_START, "Start" },
     { SDL_CONTROLLER_BUTTON_LEFTSTICK, "LS" }, { SDL_CONTROLLER_BUTTON_RIGHTSTICK, "RS" },
     { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, "LB" }, { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "RB" },
+    { INPUT_PAD_LT, "LT" }, { INPUT_PAD_RT, "RT" },
     { SDL_CONTROLLER_BUTTON_DPAD_UP, "D-pad Up" }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, "D-pad Down" },
     { SDL_CONTROLLER_BUTTON_DPAD_LEFT, "D-pad Left" }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, "D-pad Right" },
     { SDL_CONTROLLER_BUTTON_MISC1, "Misc" },

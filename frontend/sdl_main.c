@@ -58,8 +58,8 @@ extern const uint8_t icon_rgba[];
 /* configuration                                                       */
 /* ------------------------------------------------------------------ */
 /* the eight NES buttons, then the hotkeys bound the same way (key + pad button) */
-enum { K_A, K_B, K_SELECT, K_START, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_COUNT, K_REWIND = K_COUNT, K_TOTAL };
-static const char *const key_names[K_TOTAL] = { "a", "b", "select", "start", "up", "down", "left", "right", "rewind" };
+enum { K_A, K_B, K_SELECT, K_START, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_COUNT, K_REWIND = K_COUNT, K_FFWD, K_TOTAL };
+static const char *const key_names[K_TOTAL] = { "a", "b", "select", "start", "up", "down", "left", "right", "rewind", "fast_forward" };
 
 typedef struct {
     int key[K_TOTAL];    /* SDL_Keycode per NES button / hotkey */
@@ -86,8 +86,8 @@ typedef struct {
 } config_t;
 
 static config_t cfg = {
-    .key = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE },
-    .pad = { -1, -1, -1, -1, -1, -1, -1, -1, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
+    .key = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE, SDLK_TAB },
+    .pad = { -1, -1, -1, -1, -1, -1, -1, -1, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, INPUT_PAD_RT },
     .window_size = 3, .display_mode = 0, .resolution = 0, .res_w = 0, .res_h = 0, .scaling = 1, .aspect = 1, .filter = 2,
     .shader = 0, .shader_strength = 1, .overscan = 1, .no_sprite_limit = 0, .volume = 100,
     .lowlat = 1, .runahead = 2, .audio_latency = 1, .rewind = 1, .state_slot = 1, .ra_hardcore = 0, .rom = ""
@@ -157,6 +157,8 @@ static SDL_Texture *glow_tex;         /* third-size copy of the frame, added bac
 static int glow_w, glow_h;
 /* rewind history and on-screen messages */
 static void *rw_state;
+static int ff_redo;                   /* this hold of fast-forward goes forward through a rewound stretch */
+static int ff_was_held;
 static size_t rw_size;
 static char osd_text[200];
 static Uint64 osd_until;
@@ -232,8 +234,14 @@ static void osd(const char *fmt, ...) {
 }
 
 #ifdef _WIN32
-/* GUI-subsystem executable: reattach stdout/stderr when started from a console */
+/* GUI-subsystem executable: reattach stdout/stderr when started from a console, unless the
+   output is already redirected to a file or a pipe (keep that, so `> out.txt` works) */
 static void attach_parent_console(void) {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h && h != INVALID_HANDLE_VALUE) {
+        DWORD type = GetFileType(h);
+        if (type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE) return;
+    }
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         freopen("CONOUT$", "w", stdout);
         freopen("CONOUT$", "w", stderr);
@@ -315,7 +323,8 @@ static void write_config(void) {
     fprintf(f, "rewind_enabled=%d      ; keep a rewind history; hold the rewind key (above) to go back\n", cfg.rewind);
     fprintf(f, "state_slot=%d          ; save state slot 1-9 (F6 / F7 in game)\n", cfg.state_slot);
     fprintf(f, "ra_hardcore=%d         ; RetroAchievements hardcore mode: no state loads, no rewind\n", cfg.ra_hardcore);
-    fputs(";\n; Fixed keys: Esc = menu, Tab = fast-forward (hold), P = pause, F5 = save state, F8 = load state, F6 / F7 = slot,\n"
+    fputs(";\n; Fixed keys: Esc or Start + Select together = menu, P = pause, F5 = save state,\n"
+          ";             F8 = load state, F6 / F7 = slot,\n"
           ";             F11 or Alt+Enter = fullscreen, F12 = screenshot, Ctrl+R = reset\n", f);
     fclose(f);
 }
@@ -882,6 +891,88 @@ static void update_title(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Start + Select: the menu from the pad                               */
+/* ------------------------------------------------------------------ */
+/* Pressing the NES Start and Select buttons together opens the menu. The two rarely go down on
+   the same frame, and StarTropics reacts to the first one alone (Start opens its status
+   screen), so the frontend keeps the machine state from before each of the last few frames:
+   when the chord completes it goes back to before the first of the two was pressed. The game
+   never sees half a chord and no input is delayed. In RetroAchievements hardcore mode that
+   rollback would amount to a state load, so it is skipped there. */
+#define CHORD_BITS  0x0C         /* NES Select (bit 2) | Start (bit 3) */
+#define ACTION_BITS 0x0F         /* A, B, Select, Start */
+#define CHORD_RING  10           /* frames kept: the second button may follow within 9 frames (150 ms) */
+static uint8_t *chord_states;    /* CHORD_RING machine states, each from before a real frame */
+static size_t chord_size;
+static uint8_t chord_pads[CHORD_RING];     /* the pad that frame ran with */
+static uint8_t chord_pushed[CHORD_RING];   /* a rewind record was pushed after that frame */
+static int chord_head, chord_count;
+static uint8_t prev_game_pad;    /* the last pad given to the game, for press edges */
+static uint8_t suppress_mask;    /* buttons held when the game resumed: hidden from it until released */
+static int pad_override = -1;    /* tests: the pad to use instead of the keyboard and controllers */
+
+/* the timeline was replaced (state load, rewind, reset, power): the kept states are stale */
+static void chord_clear(void) { chord_count = 0; }
+
+static uint8_t raw_pad(void) { return pad_override >= 0 ? (uint8_t)pad_override : input_read(cfg.key, cfg.pad); }
+
+/* the NES pad as the game should see it */
+static uint8_t game_pad(void) {
+    uint8_t raw = raw_pad();
+    suppress_mask &= raw;                                              /* released buttons are seen again */
+    if (suppress_mask & CHORD_BITS) suppress_mask |= raw & CHORD_BITS;  /* the other half of a closing chord */
+    return (uint8_t)(raw & ~suppress_mask);
+}
+
+/* leaving the menu: buttons still held (Start to resume, A to confirm) are not passed to the
+   game until they are released; the d-pad is (a held direction just keeps walking) */
+static void resume_suppress(void) { suppress_mask = (uint8_t)(raw_pad() & ACTION_BITS); }
+
+/* Start and Select are both down and one of them has just been pressed */
+static int chord_pressed(uint8_t pad) {
+    int hit = (pad & CHORD_BITS) == CHORD_BITS && (pad & ~prev_game_pad & CHORD_BITS) != 0;
+    prev_game_pad = pad;
+    return hit;
+}
+
+/* before each real frame: keep the state it starts from and the pad it runs with */
+static void chord_record(uint8_t pad) {
+    if (!chord_states) return;
+    nes_state_save(chord_states + (size_t)chord_head * chord_size, chord_size);
+    chord_pads[chord_head] = pad;
+    chord_pushed[chord_head] = 0;
+    chord_head = (chord_head + 1) % CHORD_RING;
+    if (chord_count < CHORD_RING) chord_count++;
+}
+
+/* a rewind record was pushed after the newest kept frame */
+static void chord_mark_pushed(void) {
+    if (chord_count > 0) chord_pushed[(chord_head + CHORD_RING - 1) % CHORD_RING] = 1;
+}
+
+/* the chord completed: undo the frames that ran with half of it held (scratch holds one
+   state). Returns the number of frames undone. */
+static int chord_rollback(void *scratch) {
+    if (!chord_states || ach_hardcore()) return 0;
+    int k = 0, pushes = 0;
+    while (k < chord_count) {
+        int i = (chord_head + CHORD_RING - 1 - k) % CHORD_RING;
+        if (!(chord_pads[i] & CHORD_BITS)) break;
+        pushes += chord_pushed[i];
+        k++;
+    }
+    if (k == 0 || k >= CHORD_RING) return 0;   /* nothing to undo, or held long before: a deliberate press */
+    /* rewind records made on the undone frames go too (the first push after a clear makes no record) */
+    if (pushes > rewind_count()) rewind_clear();
+    else for (int i = 0; i < pushes; i++) rewind_pop(scratch);
+    rewind_forget_redo();
+    nes_state_load(chord_states + (size_t)((chord_head + CHORD_RING - k) % CHORD_RING) * chord_size, chord_size);
+    apu_flush_samples();
+    chord_clear();
+    return k;
+}
+
+/* ------------------------------------------------------------------ */
 /* saves                                                               */
 /* ------------------------------------------------------------------ */
 static void battery_check(int force) {
@@ -937,7 +1028,7 @@ static int state_load(void) {
     if (n == len && nes_state_load(buf, len) == 0) {
         apu_flush_samples();      /* the sound queued before the load belongs to the old timeline */
         audio_out_clear();
-        rewind_clear();
+        rewind_clear(); chord_clear();
         game_started = 1;
         osd("State loaded from slot %d", cfg.state_slot);
         ok = 1;
@@ -1045,7 +1136,7 @@ static int load_rom_file(const char *path) {
         if (strcmp(cfg.rom, full) != 0) { snprintf(cfg.rom, sizeof cfg.rom, "%s", full); write_config(); }
         ach_load_game(full, known ? known : "StarTropics");
     }
-    rewind_clear();
+    rewind_clear(); chord_clear();
     ach_reset();
     printf("ROM: %s (%s) %s | mode: %s | data folder: %s\n", rom_name, known ? known : "unknown", rom_hashes,
            sys.use_recomp ? "native (recompiled)" : "interpreter", data_dir);
@@ -1061,7 +1152,7 @@ static int load_rom_file(const char *path) {
 /* ------------------------------------------------------------------ */
 static void refresh_controls_info(void) {
     snprintf(ctl_items[K_TOTAL + 1].info, sizeof ctl_items[K_TOTAL + 1].info,
-             "Select a row, press Enter, then press the new key or pad button.\nGamepad: %.70s (the left stick always works as the d-pad; Guide or LB opens this menu).",
+             "Enter on a row, then press the new key or pad button. Pad: %.60s (its left stick is a d-pad too).",
              input_controller_summary());
 }
 
@@ -1210,13 +1301,15 @@ static void build_menu(void) {
     a[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
                       "48 kHz with the NES mixer and output filters. Dynamic rate control holds the queue at the chosen latency; use Safe if sound stutters.", NULL };
 
-    static const char *const ctl_labels[K_TOTAL] = { "A (jump)", "B (attack)", "Select", "Start", "Up", "Down", "Left", "Right", "Rewind (hold)" };
+    static const char *const ctl_labels[K_TOTAL] = { "A (jump)", "B (attack)", "Select", "Start", "Up", "Down", "Left", "Right",
+                                                     "Rewind (hold)", "Fast-forward (hold)" };
     for (int i = 0; i < K_TOTAL; i++)
         ctl_items[i] = (ui_item){ ctl_labels[i], UI_KEY, KEY_CHANGED, &cfg.key[i], NULL, 0, 0, 0, 0, NULL, "", &cfg.pad[i] };
     ctl_items[K_TOTAL] = (ui_item){ "Reset to defaults", UI_ACTION, ACT_KEYS_DEFAULT, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 1] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     ctl_items[K_TOTAL + 2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL,
-        "In game: Esc menu, Tab fast-forward, P pause, F5 / F8 save / load state, F6 / F7 slot, F11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
+        "Menu: Start + Select together, Esc, Guide or LB. Fast-forward right after a rewind goes forward again to where it began. "
+        "P pause, F5 / F8 save / load, F6 / F7 slot, F11 fullscreen, F12 screenshot, Ctrl+R reset.", NULL };
     refresh_controls_info();
 
     ui_item *r = ra_items;
@@ -1267,9 +1360,10 @@ static void open_menu(void) {
 
 static void start_game(void) {
     if (!rom_ok) { menu.tab = TAB_ROM; menu.focus = 1; ui_select_first(&menu); return; }
-    if (!game_started) { nes_power(); ach_reset(); rewind_clear(); }   /* the launcher's attract mode was running: begin fresh */
+    if (!game_started) { nes_power(); ach_reset(); rewind_clear(); chord_clear(); }   /* the launcher's attract mode was running: begin fresh */
     game_started = 1;
     state = ST_GAME;
+    resume_suppress();
     audio_out_clear();
 }
 
@@ -1292,7 +1386,7 @@ static void menu_action(ui_event e) {
         if (e.id == GFX_CHANGED) apply_graphics();
         else if (e.id == LAT_CHANGED) { audio_out_set_preset(cfg.audio_latency); write_config(); }
         else if (e.id == SLOT_CHANGED) select_slot(cfg.state_slot);
-        else if (e.id == RA_CHANGED) { ach_set_hardcore(cfg.ra_hardcore); if (cfg.ra_hardcore) rewind_clear(); write_config(); }
+        else if (e.id == RA_CHANGED) { ach_set_hardcore(cfg.ra_hardcore); if (cfg.ra_hardcore) rewind_clear(); chord_clear(); write_config(); }
         else if (e.id == RA_TEXT) { /* typed into a text row: nothing to store */ }
         else write_config();
         return;
@@ -1300,17 +1394,18 @@ static void menu_action(ui_event e) {
     if (e.type != UI_EV_ACTIVATE) return;
     switch (e.id) {
     case ACT_PLAY: start_game(); break;
-    case ACT_RESET: if (rom_ok) { nes_reset(); ach_reset(); game_started = 1; start_game(); } break;
+    case ACT_RESET: if (rom_ok) { nes_reset(); ach_reset(); chord_clear(); game_started = 1; start_game(); } break;
     case ACT_SAVE: state_save(); break;
     case ACT_LOAD: if (state_load()) start_game(); break;
-    case ACT_STOP: if (rom_ok) { battery_check(1); nes_power(); ach_reset(); rewind_clear(); game_started = 0; refresh_rom_items(); ui_select_first(&menu); } break;
+    case ACT_STOP: if (rom_ok) { battery_check(1); nes_power(); ach_reset(); rewind_clear(); chord_clear(); game_started = 0; refresh_rom_items(); ui_select_first(&menu); } break;
     case ACT_QUIT: running = 0; break;
     case ACT_CHOOSE: choose_rom(); break;
     case ACT_KEYS_DEFAULT: {
-        static const int def_keys[K_TOTAL] = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE };
+        static const int def_keys[K_TOTAL] = { SDLK_x, SDLK_z, SDLK_RSHIFT, SDLK_RETURN, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_BACKSPACE, SDLK_TAB };
         memcpy(cfg.key, def_keys, sizeof def_keys);
         input_default_pads(cfg.pad);
         cfg.pad[K_REWIND] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+        cfg.pad[K_FFWD] = INPUT_PAD_RT;
         write_config();
         break; }
     case ACT_RA_LOGIN:
@@ -1357,10 +1452,112 @@ static void fatal_box(const char *msg) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "StarTropics", msg, NULL);
 }
 
+/* --chord-test: the Start + Select rollback, through the same functions as the game loop */
+static int chord_test_frames;
+static int chord_test_step(uint8_t raw, void *scratch, int *undone) {
+    pad_override = raw;
+    uint8_t pad = game_pad();
+    if (chord_pressed(pad)) { *undone = chord_rollback(scratch); return 1; }
+    chord_record(pad);
+    nes_set_pad(0, pad);
+    nes_run_frame();
+    if ((++chord_test_frames & 1) == 0) { nes_state_save(scratch, chord_size); rewind_push(scratch); chord_mark_pushed(); }
+    return 0;
+}
+
+static uint64_t machine_hash(void *buf, size_t sz) {
+    /* the sample ring's read / write positions are bookkeeping for the audio output (a rollback
+       drops the queued sound), not state that changes what the game does: leave them out */
+    uint32_t rd = apu.ring_read, wr = apu.ring_write;
+    apu.ring_read = apu.ring_write = 0;
+    nes_state_save(buf, sz);
+    apu.ring_read = rd; apu.ring_write = wr;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < sz; i++) { h ^= ((const uint8_t *)buf)[i]; h *= 0x100000001b3ULL; }
+    return h;
+}
+
+static uint8_t chord_test_wram[8192];   /* battery RAM at the start: every run begins from it */
+static void chord_test_power(void) {
+    memcpy(cart.wram, chord_test_wram, sizeof chord_test_wram);
+    nes_power(); chord_clear(); rewind_clear();
+    prev_game_pad = 0; suppress_mask = 0; chord_test_frames = 0;
+}
+
+static int chord_selftest(void) {
+    size_t sz = nes_state_size();
+    chord_size = sz;
+    chord_states = malloc(sz * CHORD_RING);
+    uint8_t *scratch = malloc(sz), *buf = malloc(sz);
+    int failures = 0, undone = -1, fired = 0;
+#define CHECK(cond, msg) do { int c_ = (cond); printf("%s %s\n", c_ ? "ok:  " : "FAIL:", msg); if (!c_) failures++; } while (0)
+    ach_set_hardcore(0);
+    rewind_init(sz, 4u << 20);
+    memcpy(chord_test_wram, cart.wram, sizeof chord_test_wram);
+
+    /* references: the title screen at frame 700 with nothing pressed, and with Start tapped alone */
+    chord_test_power();
+    for (int i = 0; i < 823; i++) chord_test_step(0, scratch, &undone);
+    uint64_t h_clean = machine_hash(buf, sz);
+    chord_test_power();
+    for (int i = 0; i < 700; i++) chord_test_step(0, scratch, &undone);
+    for (int i = 0; i < 3; i++) chord_test_step(0x08, scratch, &undone);
+    for (int i = 0; i < 120; i++) chord_test_step(0, scratch, &undone);
+    uint64_t h_start_alone = machine_hash(buf, sz);
+    CHECK(h_start_alone != h_clean, "reference: Start alone on the title screen changes what the game does");
+
+    /* 1. Start, Start, then Select as well */
+    chord_test_power();
+    for (int i = 0; i < 700; i++) chord_test_step(0, scratch, &undone);
+    uint64_t h_before = machine_hash(buf, sz);
+    int rw_before = rewind_count();
+    fired = chord_test_step(0x08, scratch, &undone) | chord_test_step(0x08, scratch, &undone);
+    CHECK(!fired, "Start alone does not open the menu");
+    fired = chord_test_step(0x0C, scratch, &undone);
+    CHECK(fired && undone == 2, "Start, Start, Start + Select: the menu opens and the 2 Start frames are undone");
+    CHECK(machine_hash(buf, sz) == h_before, "the machine is back to the moment before Start was pressed");
+    CHECK(rewind_count() == rw_before, "the rewind history dropped the record made on an undone frame");
+    for (int i = 0; i < 123; i++) chord_test_step(0, scratch, &undone);
+    CHECK(machine_hash(buf, sz) == h_clean, "playing on, the game runs exactly as if neither button had been pressed");
+
+    /* 2. both on the same frame */
+    h_before = machine_hash(buf, sz);
+    fired = chord_test_step(0x0C, scratch, &undone);
+    CHECK(fired && undone == 0 && machine_hash(buf, sz) == h_before, "both pressed on the same frame: the menu opens, nothing to undo");
+
+    /* 3. a deliberate hold: Select for 12 frames, then Start */
+    chord_test_step(0, scratch, &undone);
+    for (int i = 0; i < 12; i++) chord_test_step(0x04, scratch, &undone);
+    h_before = machine_hash(buf, sz);
+    fired = chord_test_step(0x0C, scratch, &undone);
+    CHECK(fired && undone == 0 && machine_hash(buf, sz) == h_before, "Select held 12 frames, then Start: the menu opens, the long press is not undone");
+
+    /* 4. leaving the menu with buttons still down */
+    pad_override = 0x08; resume_suppress();
+    CHECK(game_pad() == 0, "resumed with Start still down: the game does not see it");
+    pad_override = 0x0C;
+    uint8_t p = game_pad();
+    CHECK(p == 0 && !chord_pressed(p), "Select joining that Start (a closing chord) is hidden too and does not reopen the menu");
+    pad_override = 0x00; game_pad();
+    pad_override = 0x04;
+    CHECK(game_pad() == 0x04, "once released, Select reaches the game again");
+    pad_override = 0x81; resume_suppress();
+    CHECK(game_pad() == 0x80, "resumed holding A and Right: A waits for a release, the d-pad passes");
+#undef CHECK
+
+    pad_override = -1;
+    memcpy(cart.wram, chord_test_wram, sizeof chord_test_wram);
+    rewind_shutdown();
+    free(chord_states); chord_states = NULL;
+    free(scratch); free(buf);
+    printf("chord-test: %s (%d failure%s)\n", failures ? "FAILED" : "all passed", failures, failures == 1 ? "" : "s");
+    return failures ? 1 : 0;
+}
+
 static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
            "                   [--game-shot out.png [frames]] [--rewind-test N] [--list-controllers [out.txt]]\n"
-           "                   [--list-modes [out.txt]] [--stats out.txt]\n");
+           "                   [--list-modes [out.txt]] [--chord-test] [--stats out.txt]\n");
 }
 
 static uint64_t fb_hash(void) {
@@ -1386,6 +1583,8 @@ static int rewind_selftest(int frames) {
         if ((f & 1) == 0) { nes_state_save(st, sz); rewind_push(st); }
     }
     size_t used = rewind_bytes_used();
+    void *final_state = malloc(sz);
+    nes_state_save(final_state, sz);
     int steps = 0, ok = 1;
     for (int f = frames; f >= 4; f -= 2) {
         if (!rewind_pop(st)) { printf("rewind-test: history ended early at frame %d\n", f); ok = 0; break; }
@@ -1396,11 +1595,30 @@ static int rewind_selftest(int frames) {
         if (fb_hash() != hashes[f - 1]) { printf("rewind-test: frame %d differs after rewinding\n", f - 1); ok = 0; break; }
         steps++;
     }
+    /* forward again (fast-forward after a rewind): every redone state must give the frames of the first run,
+       and the last one must be the state the rewind started from */
+    int fwd = 0;
+    if (ok) {
+        if (rewind_redo_count() != steps) { printf("rewind-test: %d steps can be undone, expected %d\n", rewind_redo_count(), steps); ok = 0; }
+        for (int f = 4; ok && f <= frames; f += 2) {
+            if (!rewind_redo(st)) { printf("rewind-test: forward history ended early at frame %d\n", f); ok = 0; break; }
+            if (f == frames) { if (memcmp(st, final_state, sz) != 0) { printf("rewind-test: forward did not return to the newest state\n"); ok = 0; } }
+            else {
+                nes_state_load(st, sz);
+                apu_flush_samples();
+                nes_set_pad(0, TEST_PAD(f + 1));
+                nes_run_frame();
+                if (fb_hash() != hashes[f + 1]) { printf("rewind-test: frame %d differs going forward again\n", f + 1); ok = 0; break; }
+            }
+            fwd++;
+        }
+        if (ok && (rewind_redo(st) || rewind_redo_count() != 0)) { printf("rewind-test: forward went past the newest state\n"); ok = 0; }
+    }
     #undef TEST_PAD
-    printf("rewind-test: %d frames forward, %d steps back %s; history %zu bytes (%.0f bytes per record)\n",
-           frames, steps, ok ? "all matched" : "FAILED", used, (double)used / (frames / 2));
+    printf("rewind-test: %d frames forward, %d steps back, %d steps forward again: %s; history %zu bytes (%.0f bytes per record)\n",
+           frames, steps, fwd, ok ? "all matched" : "FAILED", used, (double)used / (frames / 2));
     rewind_shutdown();
-    free(st); free(hashes);
+    free(st); free(hashes); free(final_state);
     return ok ? 0 : 1;
 }
 
@@ -1411,7 +1629,7 @@ int main(int argc, char **argv) {
     const char *rom_arg = NULL, *selftest_png = NULL, *uishot_png = NULL, *gameshot_png = NULL, *list_pads_file = NULL, *stats_path = NULL;
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
     const char *list_modes_file = NULL;
-    int list_modes_flag = 0;
+    int list_modes_flag = 0, chord_test = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest") && i + 2 < argc) { selftest_frames = atoi(argv[i + 1]); selftest_png = argv[i + 2]; i += 2; }
         else if (!strcmp(argv[i], "--ui-shot") && i + 1 < argc) {
@@ -1424,6 +1642,7 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) gameshot_frames = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "--rewind-test") && i + 1 < argc) rewind_test = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--chord-test")) chord_test = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(); return 0; }
         else if (!strcmp(argv[i], "--list-controllers")) { list_pads = 1; if (i + 1 < argc) list_pads_file = argv[++i]; }
         else if (!strcmp(argv[i], "--list-modes")) { list_modes_flag = 1; if (i + 1 < argc) list_modes_file = argv[++i]; }
@@ -1517,6 +1736,12 @@ int main(int argc, char **argv) {
     ui_select_first(&menu);
 
     /* ---- self tests ---- */
+    if (chord_test) {
+        if (!rom_ok) { fprintf(stderr, "chord-test: no valid ROM (%s)\n", rom_status); SDL_Quit(); return 1; }
+        int rc = chord_selftest();
+        font_quit(); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); SDL_Quit();
+        return rc;
+    }
     if (rewind_test > 0) {
         if (!rom_ok) { fprintf(stderr, "rewind-test: no valid ROM (%s)\n", rom_status); SDL_Quit(); return 1; }
         int rc = rewind_selftest(rewind_test);
@@ -1610,6 +1835,8 @@ int main(int argc, char **argv) {
     void *ra_state = malloc(ra_size);
     rw_size = ra_size;
     rw_state = malloc(rw_size);
+    chord_size = ra_size;
+    chord_states = malloc(chord_size * CHORD_RING);
     if (!rewind_init(rw_size, 32u << 20)) fprintf(stderr, "rewind: out of memory, disabled\n");
     Uint64 stats_t0 = last_present;
     double stats_lat = 0, stats_work = 0;
@@ -1619,8 +1846,13 @@ int main(int argc, char **argv) {
                             pace_names[pace_mode], refresh_hz, vsync_div, cfg.runahead);
     while (running) {
         int in_game = (state == ST_GAME && !paused);
-        const Uint8 *ks0 = SDL_GetKeyboardState(NULL);
-        int fast = in_game && ks0[SDL_SCANCODE_TAB];
+        /* fast-forward: a press while a rewound stretch can still be undone goes forward through
+           it (until released); otherwise it speeds the game up */
+        int ff_held = in_game && input_held(cfg.key[K_FFWD], cfg.pad[K_FFWD]);
+        if (!ff_held) ff_redo = 0;
+        else if (!ff_was_held && cfg.rewind && !ach_hardcore() && rewind_redo_count() > 0) ff_redo = 1;
+        ff_was_held = ff_held;
+        int fast = ff_held && !ff_redo;
 
         /* (1) phase + frame delay */
         if (!fast) {
@@ -1675,7 +1907,7 @@ int main(int argc, char **argv) {
                 case SDLK_F8: state_load(); break;
                 case SDLK_F12: save_screenshot(); break;
                 case SDLK_p: paused = !paused; audio_out_clear(); break;
-                case SDLK_r: if (ev.key.keysym.mod & KMOD_CTRL) { nes_reset(); ach_reset(); osd("Reset"); } break;
+                case SDLK_r: if (ev.key.keysym.mod & KMOD_CTRL) { nes_reset(); ach_reset(); chord_clear(); osd("Reset"); } break;
                 default: break;
                 }
             } else if (ev.type == SDL_CONTROLLERBUTTONDOWN &&
@@ -1686,22 +1918,23 @@ int main(int argc, char **argv) {
         if (!running) break;
         in_game = (state == ST_GAME && !paused);
         ach_pump();
-        if (rom_ok && ach_take_reset_request()) { nes_reset(); ach_reset(); rewind_clear(); osd("Game reset for hardcore mode"); }
+        if (rom_ok && ach_take_reset_request()) { nes_reset(); ach_reset(); rewind_clear(); chord_clear(); osd("Game reset for hardcore mode"); }
 
         if (state == ST_MENU) {
             /* launcher: let the game's own intro / title / demo play with sound until a game starts */
             if (rom_ok && !game_started) { nes_set_pad(0, 0); nes_run_frame(); audio_out_pump(0, cfg.volume); }
             draw_menu();
         } else if (paused) {
-            draw_game();
-            draw_overlays(1);
+            if (chord_pressed(game_pad())) { paused = 0; open_menu(); draw_menu(); }
+            else { draw_game(); draw_overlays(1); }
         } else if (cfg.rewind && !fast && !ach_hardcore() && input_held(cfg.key[K_REWIND], cfg.pad[K_REWIND])) {
             /* rewind: step back through the history, running one frame of each earlier state
                for its picture and sound (two frames of history per shown frame) */
             if (rewind_pop(rw_state)) {
                 nes_state_load(rw_state, rw_size);
                 apu_flush_samples();
-                nes_set_pad(0, input_read(cfg.key, cfg.pad));
+                chord_clear();
+                nes_set_pad(0, game_pad());
                 nes_run_frame();
                 audio_out_pump(0, cfg.volume);
                 snprintf(osd_text, sizeof osd_text, "<< Rewind   %d s of history left", rewind_count() * 2 / 60);
@@ -1711,29 +1944,61 @@ int main(int argc, char **argv) {
             osd_until = SDL_GetTicks64() + 300;
             draw_game();
             draw_overlays(1);
+        } else if (ff_redo) {
+            /* fast-forward after a rewind: forward again through the rewound stretch, at the
+               speed rewind went back, and stop where the rewind began */
+            if (rewind_redo(rw_state)) {
+                nes_state_load(rw_state, rw_size);
+                apu_flush_samples();
+                chord_clear();
+                nes_set_pad(0, game_pad());
+                nes_run_frame();
+                audio_out_pump(0, cfg.volume);
+                snprintf(osd_text, sizeof osd_text, ">> Forward   %d s to where the rewind began", rewind_redo_count() * 2 / 60);
+            } else {
+                snprintf(osd_text, sizeof osd_text, ">> Back where the rewind began");
+            }
+            osd_until = SDL_GetTicks64() + 300;
+            draw_game();
+            draw_overlays(1);
         } else {
             int steps = fast ? FAST_FORWARD_FRAMES : 1;
-            uint8_t pad = 0;
+            int chord = 0;
             for (int s = 0; s < steps; s++) {
-                pad = input_read(cfg.key, cfg.pad);
+                uint8_t pad = game_pad();
+                if (chord_pressed(pad)) { chord = 1; break; }
+                chord_record(pad);
                 nes_set_pad(0, pad);
                 nes_run_frame();
                 ach_frame();
                 audio_out_pump(fast, cfg.volume);
                 if (++frames % 60 == 0) battery_check(0);
-                if (cfg.rewind && !ach_hardcore() && (frames & 1) == 0) { nes_state_save(rw_state, rw_size); rewind_push(rw_state); }
+                if (cfg.rewind && !ach_hardcore() && (frames & 1) == 0) { nes_state_save(rw_state, rw_size); rewind_push(rw_state); chord_mark_pushed(); }
             }
-            if (cfg.runahead > 0 && !fast) {
-                /* run-ahead: show the frame the game will reach `runahead` frames from now with this
-                   input held, then return to the real timeline. Audio comes from the real frame only. */
-                nes_state_save(ra_state, ra_size);
-                for (int i = 0; i < cfg.runahead; i++) nes_run_frame();
-                draw_game();
-                nes_state_load(ra_state, ra_size);
+            if (chord) {
+                /* Start + Select: the menu, from the moment before the first of the two went down */
+                if (chord_rollback(rw_state)) {
+                    /* states carry no picture: draw the restored moment the way run-ahead shows it */
+                    nes_state_save(ra_state, ra_size);
+                    nes_set_pad(0, 0);
+                    for (int i = 0; i < (cfg.runahead > 0 ? cfg.runahead : 1); i++) nes_run_frame();
+                    nes_state_load(ra_state, ra_size);
+                }
+                open_menu();
+                draw_menu();
             } else {
-                draw_game();
+                if (cfg.runahead > 0 && !fast) {
+                    /* run-ahead: show the frame the game will reach `runahead` frames from now with this
+                       input held, then return to the real timeline. Audio comes from the real frame only. */
+                    nes_state_save(ra_state, ra_size);
+                    for (int i = 0; i < cfg.runahead; i++) nes_run_frame();
+                    draw_game();
+                    nes_state_load(ra_state, ra_size);
+                } else {
+                    draw_game();
+                }
+                draw_overlays(1);
             }
-            draw_overlays(1);
         }
         Uint64 t1 = SDL_GetPerformanceCounter();
 
@@ -1796,6 +2061,8 @@ int main(int argc, char **argv) {
 
     free(ra_state);
     free(rw_state);
+    free(chord_states);
+    chord_states = NULL;
     rewind_shutdown();
     ach_shutdown();
     gpu_sync_timer_end();

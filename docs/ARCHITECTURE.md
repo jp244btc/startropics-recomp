@@ -182,7 +182,18 @@ oldest record can overlap the space a new one needs, so eviction walks from the
 oldest. Stepping back applies the newest record to the current state. While the
 key is held the frontend pops a record, loads it, runs one frame (so the picture
 and the sound of that moment are regenerated) and shows it: two frames of
-history per shown frame.
+history per shown frame. Stepping back leaves each record's bytes in the ring (only the
+index forgets it), so fast-forward right after a rewind applies the same records again,
+newest last, and returns to exactly the state the rewind started from; the next push
+(playing on) forgets them.
+
+**Start + Select.** The chord opens the menu without the game seeing half of it: the
+frontend keeps the state from before each of the last ten real frames with the pad that
+frame ran with, and when the second button goes down it loads the state from before the
+first one did (dropping any rewind records made in between). A press held for ten frames
+or more counts as deliberate and is not undone; hardcore mode never rolls back. Buttons
+held when the game resumes from the menu are masked until released, so the Start or A
+that closed the menu does not reach the game.
 
 **Shaders.** `draw_game_ex` composes the picture into a render target when a
 shader or an internal resolution is active: game frame (nearest / linear / sharp

@@ -50,7 +50,7 @@ does not fill the screen when it does not (integer multiples, or a 16:9 picture 
 aware), so a 1920x1080 preset is 1920x1080 pixels. Esc in game opens the same menu
 as a pause screen. XInput and other gamepads are handled through SDL's game
 controller API (A = A, B or X = B, Start, Back = Select, D-pad or left stick;
-the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
+Start + Select together, the Guide button or LB opens the menu); pads SDL has no mapping for fall back to
 a generic joystick layout, and `startropics --list-controllers out.txt` writes
 what SDL detected.
 
@@ -157,8 +157,8 @@ rate control. Exclusive fullscreen bypasses the desktop compositor. All of this 
 adjustable on the Graphics and Audio tabs, and `startropics --play --stats
 out.txt` logs the measured pacing once a second.
 
-Hotkeys: **Esc** menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
-**Tab** (hold) fast-forward, **P** pause, **F5** / **F8** save / load state,
+Hotkeys: **Esc** or **Start + Select** together (pad or keyboard) menu, **F11** / Alt+Enter fullscreen, **F2** toggle overscan crop,
+**Tab** / pad RT (hold) fast-forward (right after a rewind it first goes forward again to where the rewind began), **P** pause, **F5** / **F8** save / load state,
 **F6** / **F7** previous / next save state slot (nine per ROM), **Backspace** (hold;
 pad RB) rewind, **F12** screenshot (`screenshots/`), **Ctrl+R** reset. Keys and
 display settings are in the menu and in `startropics.ini` next to the executable.

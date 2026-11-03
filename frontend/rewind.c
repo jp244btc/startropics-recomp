@@ -6,6 +6,9 @@
  * remembers where each record is. Records are made and dropped in order, so
  * when a new record needs room only the oldest record can be in the way.
  *
+ * Stepping back leaves the record in place (only the index forgets it), so
+ * until the next push the step can be undone by applying the same record again.
+ *
  * Record format: pairs of <zero run><literal run><literal bytes>, both runs as
  * LEB128-style varints, until the state length is covered. The literal bytes are
  * the XOR of the new state with the previous one, so applying a record to the
@@ -27,6 +30,7 @@ static size_t   cap, head;        /* ring capacity, next write offset */
 static rec_t   *idx;
 static int      idx_cap, idx_first, idx_count;   /* circular: oldest at idx_first */
 static size_t   used;
+static int      redo_count;       /* records stepped back over and still intact, newest last */
 
 static void drop_oldest(void) {
     if (idx_count == 0) return;
@@ -64,6 +68,7 @@ void rewind_clear(void) {
     head = used = 0;
     idx_first = idx_count = 0;
     have_cur = 0;
+    redo_count = 0;
 }
 
 static size_t put_varint(uint8_t *p, size_t v) {
@@ -129,6 +134,7 @@ static void apply(uint8_t *state, const uint8_t *rec, size_t len) {
 
 void rewind_push(const void *state) {
     if (!ring) return;
+    redo_count = 0;                                      /* the timeline goes on from here: no going forward into the old one */
     if (!have_cur) { memcpy(cur, state, ssize); have_cur = 1; return; }
     size_t len = encode((const uint8_t *)state, cur, enc);
     if (head + len > cap) head = 0;                      /* would cross the end: start over at the front */
@@ -155,10 +161,26 @@ int rewind_pop(void *state_out) {
     apply(cur, ring + idx[slot].off, idx[slot].len);
     used -= idx[slot].len;
     idx_count--;
+    redo_count++;                                        /* its bytes stay where they are until the next push */
     head = idx[slot].off;                                /* the freed space is reused next */
     memcpy(state_out, cur, ssize);
     return 1;
 }
+
+int rewind_redo(void *state_out) {
+    if (!ring || !have_cur || redo_count == 0) return 0;
+    int slot = (idx_first + idx_count) % idx_cap;        /* the record just after the newest one kept */
+    apply(cur, ring + idx[slot].off, idx[slot].len);     /* XOR again: back to the newer state */
+    used += idx[slot].len;
+    idx_count++;
+    redo_count--;
+    head = idx[slot].off + idx[slot].len;
+    memcpy(state_out, cur, ssize);
+    return 1;
+}
+
+int rewind_redo_count(void) { return redo_count; }
+void rewind_forget_redo(void) { redo_count = 0; }
 
 int rewind_count(void) { return idx_count; }
 size_t rewind_bytes_used(void) { return used; }

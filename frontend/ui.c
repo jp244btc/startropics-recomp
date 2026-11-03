@@ -59,6 +59,42 @@ static int item_value_text(const ui_item *it, int capture, char *buf, size_t n) 
     }
 }
 
+/* text with '\n' between paragraphs, each wrapped at words to maxw pixels; draws it when
+   draw is set; returns the number of lines */
+static int wrap_text(SDL_Renderer *r, int x, int y, int maxw, int scale, SDL_Color c, const char *p, int draw) {
+    int lh = FONT_CELL_H * scale + scale, lines = 0;
+    while (*p) {
+        const char *end = strchr(p, '\n');
+        size_t plen = end ? (size_t)(end - p) : strlen(p);
+        size_t start = 0;
+        if (plen == 0) lines++;
+        while (start < plen) {
+            /* the longest run of words from start that fits (at least one word) */
+            size_t best = 0;
+            for (size_t k = start; k <= plen; k++) {
+                if (k < plen && p[k] != ' ') continue;
+                size_t len = k - start;
+                if (len == 0) continue;
+                if (best == 0 || (int)len * FONT_CELL_W * scale <= maxw) best = len;
+                if ((int)len * FONT_CELL_W * scale > maxw) break;
+            }
+            if (draw) {
+                char line[400];
+                if (best >= sizeof line) best = sizeof line - 1;
+                memcpy(line, p + start, best);
+                line[best] = 0;
+                font_draw(r, x, y + lines * lh, scale, c, 0, line);
+            }
+            lines++;
+            start += best;
+            while (start < plen && p[start] == ' ') start++;
+        }
+        p += plen;
+        if (*p == '\n') p++;
+    }
+    return lines;
+}
+
 void ui_select_first(ui_menu *m) {
     ui_tab *t = &m->tabs[m->tab];
     t->sel = 0;
@@ -107,56 +143,47 @@ void ui_draw(SDL_Renderer *r, ui_menu *m, int ww, int wh) {
         font_draw(r, rc.x + mg, rc.y + (row - FONT_CELL_H * s) / 2, s, i == m->tab ? C_TEXT : C_DIM, 0, m->tabs[i].name);
     }
 
-    /* item panel */
+    /* item panel: scrolls to keep the selected row in view when the tab is taller than the panel */
     SDL_Rect right = { left.x + left.w + mg, y, ww - (left.x + left.w + mg) - mg, body_h };
     fill(r, right, panel);
     ui_tab *t = &m->tabs[m->tab];
-    int iy = right.y + mg / 2;
+    int small = s > 1 ? s - 1 : 1;                  /* information text scale */
+    int lh = FONT_CELL_H * small + small;
+    int maxw = right.w - 2 * mg;
+    int heights[UI_MAX_ITEMS];
+    int total = mg / 2, sel_bottom = 0, last_sel = -1;
+    for (int i = 0; i < t->nitems && i < UI_MAX_ITEMS; i++) {
+        ui_item *it = &t->items[i];
+        heights[i] = it->kind == UI_INFO ? wrap_text(r, 0, 0, maxw, small, C_DIM, it->info, 0) * lh + 2 * s : row;
+        if (selectable(it)) last_sel = i;
+        if (i == t->sel) sel_bottom = total + heights[i];
+        total += heights[i] + s;
+    }
+    int view = right.h;
+    int off = 0;
+    if (total > view) {
+        if (t->sel == last_sel) off = total - view;               /* the last row: show what follows it too */
+        else if (sel_bottom + mg / 2 > view) off = sel_bottom + mg / 2 - view;
+        if (off > total - view) off = total - view;
+        if (off < 0) off = 0;
+    }
+    SDL_RenderSetClipRect(r, &right);
+    int iy = right.y + mg / 2 - off;
     for (int i = 0; i < UI_MAX_ITEMS; i++) { m->item_rects[i].w = 0; m->left_arrow[i].w = 0; m->right_arrow[i].w = 0; }
     for (int i = 0; i < t->nitems && i < UI_MAX_ITEMS; i++) {
         ui_item *it = &t->items[i];
+        int h = heights[i];
+        /* only a row shown whole takes mouse clicks */
+        int whole = iy >= right.y && iy + h <= right.y + right.h;
+        if (iy + h < right.y || iy > right.y + right.h) { iy += h + s; continue; }
         if (it->kind == UI_INFO) {
-            /* dim text: '\n' separates paragraphs, each wrapped at words to the panel's width */
-            int small = s > 1 ? s - 1 : 1;
-            int lh = FONT_CELL_H * small + small;
-            int maxw = right.w - 2 * mg;
-            SDL_Rect rc = { right.x, iy, right.w, 0 };
-            int ly = iy + s;
-            const char *p = it->info;
-            while (*p) {
-                const char *end = strchr(p, '\n');
-                size_t plen = end ? (size_t)(end - p) : strlen(p);
-                size_t start = 0;
-                if (plen == 0) ly += lh;
-                while (start < plen) {
-                    /* the longest run of words from start that fits (at least one word) */
-                    size_t best = 0;
-                    for (size_t k = start; k <= plen; k++) {
-                        if (k < plen && p[k] != ' ') continue;
-                        size_t len = k - start;
-                        if (len == 0) continue;
-                        if (best == 0 || (int)len * FONT_CELL_W * small <= maxw) best = len;
-                        if ((int)len * FONT_CELL_W * small > maxw) break;
-                    }
-                    char line[400];
-                    if (best >= sizeof line) best = sizeof line - 1;
-                    memcpy(line, p + start, best);
-                    line[best] = 0;
-                    font_draw(r, right.x + mg, ly, small, C_DIM, 0, line);
-                    ly += lh;
-                    start += best;
-                    while (start < plen && p[start] == ' ') start++;
-                }
-                p += plen;
-                if (*p == '\n') p++;
-            }
-            rc.h = ly - iy + s;
-            m->item_rects[i] = rc;
-            iy += rc.h + s;
+            wrap_text(r, right.x + mg, iy + s, maxw, small, C_DIM, it->info, 1);
+            if (whole) m->item_rects[i] = (SDL_Rect){ right.x, iy, right.w, h };
+            iy += h + s;
             continue;
         }
         SDL_Rect rc = { right.x, iy, right.w, row };
-        m->item_rects[i] = rc;
+        if (whole) m->item_rects[i] = rc;
         int selected = (m->focus == 1 && t->sel == i);
         if (selected) fill(r, rc, C_ROW);
         else if (i == m->hover_item) fill(r, rc, C_ROWHOV);
@@ -181,13 +208,19 @@ void ui_draw(SDL_Renderer *r, ui_menu *m, int ww, int wh) {
             if (adjustable) {
                 font_draw(r, lx, ty, s, selected ? C_ACCENT : C_DIM, 0, "<");
                 font_draw(r, rx, ty, s, selected ? C_ACCENT : C_DIM, 0, ">");
-                m->left_arrow[i] = (SDL_Rect){ lx - s, rc.y, aw + 2 * s, rc.h };
-                m->right_arrow[i] = (SDL_Rect){ rx - s, rc.y, aw + 2 * s, rc.h };
+                if (whole) {
+                    m->left_arrow[i] = (SDL_Rect){ lx - s, rc.y, aw + 2 * s, rc.h };
+                    m->right_arrow[i] = (SDL_Rect){ rx - s, rc.y, aw + 2 * s, rc.h };
+                }
             }
             font_draw(r, vx, ty, s, selected ? C_TEXT : C_DIM, 0, vbuf);
         }
         iy += row + s;
     }
+    SDL_RenderSetClipRect(r, NULL);
+    /* more above / below */
+    if (off > 0) font_draw(r, right.x + right.w - mg - FONT_CELL_W * small, right.y + s, small, C_ACCENT, 0, "^");
+    if (off < total - view) font_draw(r, right.x + right.w - mg - FONT_CELL_W * small, right.y + right.h - FONT_CELL_H * small - s, small, C_ACCENT, 0, "v");
 
     /* footer */
     int fy = wh - footer_h + mg / 2;
@@ -345,7 +378,27 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
             end_capture(m);
             return ev(UI_EV_NONE, 0);
         }
+        /* an auto-repeating Enter / Space / Escape (a key held since before the menu opened, such
+           as the keyboard's Start + Select) must not activate or close anything; arrows still repeat */
+        if (e->key.repeat) {
+            SDL_Keycode k = e->key.keysym.sym;
+            if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_ESCAPE || k == SDLK_BACKSPACE)
+                return ev(UI_EV_NONE, 0);
+        }
         return key_action(m, e->key.keysym.sym);
+    case SDL_CONTROLLERAXISMOTION:
+        /* the triggers are axes: pulled past half way while a row waits for a binding, they bind like buttons */
+        if (m->capture == UI_CAPTURE_KEY && e->caxis.value > 16000 &&
+            (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+            ui_tab *t = &m->tabs[m->tab];
+            ui_item *it = (t->nitems > 0) ? &t->items[t->sel] : NULL;
+            m->capture = UI_CAPTURE_NONE;
+            if (it && it->kind == UI_KEY && it->pad) {
+                *it->pad = e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? INPUT_PAD_LT : INPUT_PAD_RT;
+                return ev(UI_EV_CHANGED, it->id);
+            }
+        }
+        return ev(UI_EV_NONE, 0);
     case SDL_TEXTINPUT:
         if (m->capture == UI_CAPTURE_TEXT) {
             ui_tab *t = &m->tabs[m->tab];

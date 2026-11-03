@@ -4,8 +4,9 @@
  *
  * Threading: every ach_* function, and therefore every rc_client call, runs on the main
  * thread. rc_client asks for HTTP through server_call(); the request is copied and run on
- * a detached SDL worker thread (WinHTTP on Windows, libcurl when RC_HTTP_CURL is defined,
- * otherwise requests fail with a clear message). Finished requests land in a
+ * a detached SDL worker thread (WinHTTP on Windows; libcurl when RC_HTTP_CURL is defined, or
+ * loaded at run time with RC_HTTP_CURL_DLOPEN (Linux); the Java side's HttpURLConnection on
+ * Android; otherwise requests fail with a clear message). Finished requests land in a
  * mutex-protected queue that ach_pump() drains on the main thread, handing each response
  * to rc_client there. ach_shutdown() raises a flag so completions that arrive afterwards
  * are dropped instead of touching a destroyed client.
@@ -30,12 +31,64 @@
 #  include <windows.h>
 #endif
 
-#if defined(RC_HTTP_CURL)
+#if defined(RC_HTTP_CURL) || defined(RC_HTTP_CURL_DLOPEN)
+#  define CURL_DISABLE_TYPECHECK 1
 #  include <curl/curl.h>
 #  define ACH_HTTP_CURL 1
+#  ifdef RC_HTTP_CURL_DLOPEN
+#    include <dlfcn.h>
+/* libcurl is loaded at run time, so the program also starts where it is not installed
+   (RetroAchievements then says so instead of the program failing to launch) */
+static struct {
+    int loaded;
+    CURLcode (*global_init)(long);
+    CURL *(*easy_init)(void);
+    CURLcode (*easy_setopt)(CURL *, CURLoption, ...);
+    CURLcode (*easy_perform)(CURL *);
+    CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...);
+    void (*easy_cleanup)(CURL *);
+    const char *(*easy_strerror)(CURLcode);
+    struct curl_slist *(*slist_append)(struct curl_slist *, const char *);
+    void (*slist_free_all)(struct curl_slist *);
+} dl_curl;
+
+static int curl_load(void) {
+    static const char *const names[] = { "libcurl.so.4", "libcurl-gnutls.so.4", "libcurl.so" };
+    void *h = NULL;
+    for (size_t i = 0; i < sizeof names / sizeof names[0] && !h; i++) h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+    if (!h) return 0;
+#    define DL_CURL(field, sym) if (!(*(void **)&dl_curl.field = dlsym(h, sym))) return 0
+    DL_CURL(global_init, "curl_global_init");
+    DL_CURL(easy_init, "curl_easy_init");
+    DL_CURL(easy_setopt, "curl_easy_setopt");
+    DL_CURL(easy_perform, "curl_easy_perform");
+    DL_CURL(easy_getinfo, "curl_easy_getinfo");
+    DL_CURL(easy_cleanup, "curl_easy_cleanup");
+    DL_CURL(easy_strerror, "curl_easy_strerror");
+    DL_CURL(slist_append, "curl_slist_append");
+    DL_CURL(slist_free_all, "curl_slist_free_all");
+#    undef DL_CURL
+    dl_curl.loaded = 1;
+    return 1;
+}
+#    undef curl_easy_setopt      /* curl.h's pass-through argument-count macros */
+#    undef curl_easy_getinfo
+#    define curl_global_init    dl_curl.global_init
+#    define curl_easy_init      dl_curl.easy_init
+#    define curl_easy_setopt    dl_curl.easy_setopt
+#    define curl_easy_perform   dl_curl.easy_perform
+#    define curl_easy_getinfo   dl_curl.easy_getinfo
+#    define curl_easy_cleanup   dl_curl.easy_cleanup
+#    define curl_easy_strerror  dl_curl.easy_strerror
+#    define curl_slist_append   dl_curl.slist_append
+#    define curl_slist_free_all dl_curl.slist_free_all
+#  endif
 #elif defined(_WIN32)
 #  include <winhttp.h>
 #  define ACH_HTTP_WINHTTP 1
+#elif defined(__ANDROID__)
+#  include <jni.h>
+#  define ACH_HTTP_ANDROID 1
 #endif
 
 #include <SDL.h>
@@ -420,6 +473,13 @@ static void http_perform(http_job_t *job) {
     job->body_len = 0;
     errbuf[0] = '\0';
 
+#ifdef RC_HTTP_CURL_DLOPEN
+    if (!dl_curl.loaded) {
+        http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR,
+                      "libcurl (libcurl.so.4) is not installed, so RetroAchievements cannot connect");
+        return;
+    }
+#endif
     curl = curl_easy_init();
     if (!curl) { http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "could not initialise libcurl"); return; }
 
@@ -459,7 +519,83 @@ static void http_perform(http_job_t *job) {
 }
 #endif /* ACH_HTTP_CURL */
 
-#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL)
+#ifdef ACH_HTTP_ANDROID
+/* HTTP through the app's Java side (HttpURLConnection). StarTropicsActivity.httpRequest returns
+   the status as 4 big-endian bytes, then the body; status 0 means the body is an error message. */
+static jclass g_http_class;
+static jmethodID g_http_method;
+
+/* main thread: a native worker thread cannot look up the app's own classes */
+static void android_http_init(void) {
+    if (g_http_class) return;
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    if (!env) return;
+    jclass cls = (*env)->FindClass(env, "org/startropics/nativeport/StarTropicsActivity");
+    if (!cls) { (*env)->ExceptionClear(env); return; }
+    jmethodID m = (*env)->GetStaticMethodID(env, cls, "httpRequest",
+                                            "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;I)[B");
+    if (!m) { (*env)->ExceptionClear(env); (*env)->DeleteLocalRef(env, cls); return; }
+    g_http_class = (jclass)(*env)->NewGlobalRef(env, cls);
+    g_http_method = m;
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+/* runs on the worker thread (SDL attaches it to the Java VM): fills job->body / body_len / status */
+static void http_perform(http_job_t *job) {
+    free(job->body);
+    job->body = NULL;
+    job->body_len = 0;
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    if (!env || !g_http_class) {
+        http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "the network bridge is not available");
+        return;
+    }
+    jstring jurl = (*env)->NewStringUTF(env, job->url);
+    jstring jct = (*env)->NewStringUTF(env, job->content_type);
+    jstring jua = (*env)->NewStringUTF(env, g_user_agent);
+    jbyteArray jpost = NULL;
+    if (job->post_data) {
+        jpost = (*env)->NewByteArray(env, (jsize)job->post_len);
+        if (jpost) (*env)->SetByteArrayRegion(env, jpost, 0, (jsize)job->post_len, (const jbyte *)job->post_data);
+    }
+    jbyteArray res = (jbyteArray)(*env)->CallStaticObjectMethod(env, g_http_class, g_http_method, jurl, jpost, jct, jua,
+                                                                (jint)ACH_HTTP_TIMEOUT_MS);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); res = NULL; }
+    jsize n = res ? (*env)->GetArrayLength(env, res) : 0;
+    if (n < 4) {
+        http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "Could not reach the RetroAchievements server");
+    } else {
+        jbyte *b = (*env)->GetByteArrayElements(env, res, NULL);
+        int status = (int)(((uint32_t)(uint8_t)b[0] << 24) | ((uint32_t)(uint8_t)b[1] << 16) |
+                           ((uint32_t)(uint8_t)b[2] << 8) | (uint32_t)(uint8_t)b[3]);
+        size_t blen = (size_t)(n - 4);
+        if (status <= 0) {
+            char message[300];
+            snprintf(message, sizeof message, "Could not reach the RetroAchievements server: %.*s",
+                     (int)(blen < 200 ? blen : 200), (const char *)b + 4);
+            http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, message);
+        } else {
+            job->body = (char *)malloc(blen + 1);
+            if (!job->body) {
+                http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory");
+            } else {
+                memcpy(job->body, b + 4, blen);
+                job->body[blen] = '\0';
+                job->body_len = blen;
+                job->status = status;
+            }
+        }
+        (*env)->ReleaseByteArrayElements(env, res, b, JNI_ABORT);
+    }
+    if (res) (*env)->DeleteLocalRef(env, res);
+    if (jpost) (*env)->DeleteLocalRef(env, jpost);
+    (*env)->DeleteLocalRef(env, jua);
+    (*env)->DeleteLocalRef(env, jct);
+    (*env)->DeleteLocalRef(env, jurl);
+}
+#endif /* ACH_HTTP_ANDROID */
+
+#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL) || defined(ACH_HTTP_ANDROID)
 static int SDLCALL http_worker(void *arg) {
     http_job_t *job = (http_job_t *)arg;
     http_perform(job);
@@ -488,7 +624,7 @@ static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_serv
         http_job_complete(job);
         return;
     }
-#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL)
+#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL) || defined(ACH_HTTP_ANDROID)
     {
         SDL_Thread *thread = SDL_CreateThread(http_worker, "ra-http", job);
         if (!thread) {
@@ -748,8 +884,19 @@ int ach_init(const char *data_dir) {
 #ifdef ACH_HTTP_CURL
     {
         static int curl_ready;
-        if (!curl_ready) { curl_global_init(CURL_GLOBAL_DEFAULT); curl_ready = 1; }
+        if (!curl_ready) {
+#ifdef RC_HTTP_CURL_DLOPEN
+            if (curl_load()) curl_global_init(CURL_GLOBAL_DEFAULT);
+            else printf("[ra] libcurl.so.4 not found: RetroAchievements cannot connect\n");
+#else
+            curl_global_init(CURL_GLOBAL_DEFAULT);
+#endif
+            curl_ready = 1;
+        }
     }
+#endif
+#ifdef ACH_HTTP_ANDROID
+    android_http_init();
 #endif
     g_client = rc_client_create(read_memory, server_call);
     if (!g_client) return -1;

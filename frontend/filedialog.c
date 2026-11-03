@@ -1,6 +1,7 @@
 /*
  * filedialog.c - Windows: GetOpenFileNameW (comdlg32); macOS: osascript;
- * Linux/BSD: zenity or kdialog if installed.
+ * Linux/BSD: zenity or kdialog if installed; Android: the system document picker
+ * (asynchronous: the chosen file arrives as an SDL_DROPFILE event).
  */
 #include "filedialog.h"
 #include <stdio.h>
@@ -35,6 +36,29 @@ int file_dialog_open(SDL_Window *parent, char *out, size_t out_len) {
     if (!GetOpenFileNameW(&ofn)) return 0;
     if (WideCharToMultiByte(CP_UTF8, 0, buf, -1, out, (int)out_len, NULL, NULL) == 0) return 0;
     return 1;
+}
+
+#elif defined(__ANDROID__)
+#include <jni.h>
+#include <SDL_system.h>
+
+int file_dialog_available(void) { return 1; }
+
+/* The activity shows the document picker, copies the chosen file into the app's storage and
+   hands its path over as a drop event, which the main loop already treats as "load this ROM".
+   Nothing is chosen yet when this returns. */
+int file_dialog_open(SDL_Window *parent, char *out, size_t out_len) {
+    (void)parent; (void)out; (void)out_len;
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    if (!env || !activity) return 0;
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID m = cls ? (*env)->GetMethodID(env, cls, "pickRom", "()V") : NULL;
+    if (m) (*env)->CallVoidMethod(env, activity, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, activity);
+    return 0;
 }
 
 #else

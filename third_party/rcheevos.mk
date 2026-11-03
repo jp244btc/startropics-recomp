@@ -11,8 +11,10 @@ RCHEEVOS_CFLAGS := -I$(RC_DIR)/include -I$(RC_DIR)/src -DRC_CLIENT_SUPPORTS_HASH
 ifeq ($(WINDOWS),1)
   RCHEEVOS_LIBS := -lwinhttp
 else ifneq ($(shell pkg-config --exists libcurl 2>/dev/null && echo yes),)
-  RCHEEVOS_CFLAGS += -DRC_HTTP_CURL $(shell pkg-config --cflags libcurl)
-  RCHEEVOS_LIBS := $(shell pkg-config --libs libcurl) -lpthread
+  # libcurl's headers at build time only: the library itself is loaded at run time (dlopen), so the
+  # program also starts on systems without it (RetroAchievements then reports that it is missing)
+  RCHEEVOS_CFLAGS += -DRC_HTTP_CURL_DLOPEN $(shell pkg-config --cflags libcurl)
+  RCHEEVOS_LIBS := -ldl -lpthread
 else
   RCHEEVOS_LIBS := -lpthread
 endif

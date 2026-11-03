@@ -353,7 +353,7 @@ static ui_event key_action(ui_menu *m, SDL_Keycode k) {
         if (m->focus == 0) { m->focus = 1; if (it && !selectable(it)) ui_select_first(m); }
         else if (it) return activate(m, it);
         break;
-    case SDLK_ESCAPE: case SDLK_BACKSPACE:
+    case SDLK_ESCAPE: case SDLK_BACKSPACE: case SDLK_AC_BACK:
         if (m->focus == 1) m->focus = 0;
         else return ev(UI_EV_BACK, 0);
         break;
@@ -382,7 +382,7 @@ ui_event ui_handle_event(ui_menu *m, const SDL_Event *e) {
            as the keyboard's Start + Select) must not activate or close anything; arrows still repeat */
         if (e->key.repeat) {
             SDL_Keycode k = e->key.keysym.sym;
-            if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_ESCAPE || k == SDLK_BACKSPACE)
+            if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_ESCAPE || k == SDLK_BACKSPACE || k == SDLK_AC_BACK)
                 return ev(UI_EV_NONE, 0);
         }
         return key_action(m, e->key.keysym.sym);

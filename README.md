@@ -111,7 +111,8 @@ Requirements: a C11 compiler (gcc/clang), GNU make, Python 3, SDL2 (frontend onl
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 make python
 ```
 
-**Linux**: `sudo apt install build-essential python3 libsdl2-dev` (or your distro's equivalent).
+**Linux**: `sudo apt install build-essential python3 libsdl2-dev libcurl4-openssl-dev` (or your
+distro's equivalent) for a local build; portable packages are built in a container (below).
 
 Then:
 
@@ -129,6 +130,43 @@ instructions in 430 routines for the USA dump from static analysis alone, a few
 hundred more with coverage data). Run `make recomp` again after collecting more
 coverage (below) and rebuild. `make dist` zips the executable with the player
 notes (`docs/PLAYERS.md`) into `dist/`.
+
+### Linux and Steam Deck packages
+
+`tools/linux/Dockerfile` is an Ubuntu 22.04 build environment with SDL2 built from
+source as a static library that loads X11, Wayland, PipeWire, PulseAudio, ALSA and
+udev at run time. The resulting binary needs only glibc 2.34+ and libm, so it runs on
+SteamOS 3 and current distributions without installing anything; libcurl (for
+RetroAchievements) is loaded at run time when present. After `make recomp`:
+
+```
+docker build -t startropics-linux tools/linux
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src startropics-linux sh tools/linux/build.sh
+```
+
+This builds, runs the cosimulation and the frontend self-tests headless (SDL's
+offscreen driver), and writes `dist/startropics-linux-x86_64.tar.gz` and
+`dist/startropics-steamdeck.tar.gz`. The Steam Deck edition (`make DECK_EDITION=1`)
+starts fullscreen at the Deck's 1280x800 in the 16:10 widescreen view with pad-first
+hints; the generic Linux build does the same when it finds itself on a Deck. Setup on
+the Deck: `docs/STEAMDECK.md`.
+
+### Android
+
+`android/build_apk.py` builds `dist/startropics-android.apk` straight from the Android
+SDK tools (no Gradle): SDL2's Java glue and native library from the SDL source (fetched
+once), the game as `libmain.so` for arm64-v8a and x86_64 (NDK + CMake), a small activity
+for the system file picker and for RetroAchievements' HTTP, and launcher icons drawn from
+the port's own artwork. It needs a platform 34+, build-tools, an NDK and CMake from the SDK
+manager, plus a JDK; the APK is signed with a key kept in
+`~/.android/startropics-release.keystore` (created on first use).
+
+```
+python android/build_apk.py              # after make recomp
+python android/build_apk.py --install    # and adb install it
+```
+
+Player notes for handhelds: `docs/ANDROID.md`.
 
 ### Controls
 
@@ -248,9 +286,11 @@ instruction that fell back to the interpreter, so repeating the cycle converges.
 recomp/        the static recompiler (Python) and symbols.txt (address labels, no game data)
 runtime/       hardware runtime + headless harness (C11)
 frontend/      SDL2 player (menu, video, audio, input, rewind, achievements)
+android/       Android app: CMake project, manifest, activity, build_apk.py
 third_party/   rcheevos (RetroAchievements client, MIT) and its make include
 tests/         accuracy tests, cosimulation, nestest comparison, module tests
-docs/          architecture notes
+tools/         icon generator, Linux / Steam Deck build container (tools/linux), DXGI adapter lister
+docs/          architecture notes, player notes (Windows/Linux, Steam Deck, Android)
 generated/     output of make recomp (git-ignored)
 rom/           your .nes file (git-ignored)
 ```

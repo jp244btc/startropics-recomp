@@ -35,16 +35,30 @@ RUNTIME_OBJ := $(patsubst runtime/%.c,$(BUILD)/%.o,$(RUNTIME_SRC))
 GEN_SRC := $(wildcard $(GEN)/*.c)
 GEN_OBJ := $(patsubst $(GEN)/%.c,$(BUILD)/gen/%.o,$(GEN_SRC))
 
-SDL_CFLAGS := $(shell sdl2-config --cflags 2>/dev/null)
+SDL_CONFIG ?= sdl2-config
+SDL_CFLAGS := $(shell $(SDL_CONFIG) --cflags 2>/dev/null)
 ifeq ($(WINDOWS),1)
   # single-file executable: SDL2 and the MinGW runtime (libgcc, winpthread) linked statically, so
   # nothing but Windows' own DLLs is needed; a stray 32-bit libwinpthread-1.dll on the PATH would
   # otherwise stop the program with error 0xc000007b
-  SDL_LIBS := -static $(shell sdl2-config --static-libs 2>/dev/null) -lcomdlg32 -ldxgi -static-libgcc
+  SDL_LIBS := -static $(shell $(SDL_CONFIG) --static-libs 2>/dev/null) -lcomdlg32 -ldxgi -static-libgcc
   PLATFORM := win64
+  ARCHIVE := zip
 else
-  SDL_LIBS := $(shell sdl2-config --libs 2>/dev/null)
+  ifeq ($(SDL_STATIC),1)
+    # SDL2 linked in (it loads its display, sound and input backends at run time), so the
+    # binary runs without an SDL installation: see tools/linux/build.sh
+    SDL_LIBS := $(shell $(SDL_CONFIG) --static-libs 2>/dev/null) -static-libgcc
+  else
+    SDL_LIBS := $(shell $(SDL_CONFIG) --libs 2>/dev/null)
+  endif
   PLATFORM := $(shell uname -s | tr A-Z a-z)-$(shell uname -m)
+  ARCHIVE := gztar
+endif
+# the Steam Deck edition: Deck defaults (fullscreen 1280x800, 16:10, pad-first) on every machine
+ifeq ($(DECK_EDITION),1)
+  CFLAGS += -DDECK_EDITION
+  PLATFORM := steamdeck
 endif
 
 FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c
@@ -88,14 +102,14 @@ $(BUILD)/gen/%.o: $(GEN)/%.c runtime/nes.h runtime/recomp_rt.h
 headless: $(BUILD)/nes-headless$(EXE)
 
 $(BUILD)/nes-headless$(EXE): $(RUNTIME_OBJ) $(BUILD)/headless.o $(BUILD)/recomp_stub.o
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lm
 
 # ---- headless harness with recompiled code ----
 headless-recomp: $(BUILD)/nes-headless-recomp$(EXE)
 
 $(BUILD)/nes-headless-recomp$(EXE): $(RUNTIME_OBJ) $(BUILD)/headless.o $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lm
 
 # ---- recompiler ----
 recomp:
@@ -107,7 +121,7 @@ startropics: $(BUILD)/startropics$(EXE)
 
 $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
-	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(RCHEEVOS_LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(RCHEEVOS_LIBS) $(LDFLAGS) -lm
 
 # rcheevos sources compile with their own flags (search path for the vendored tree)
 define RC_RULE
@@ -131,8 +145,10 @@ dist: $(BUILD)/startropics$(EXE)
 	cp $(BUILD)/startropics$(EXE) dist/startropics/
 	cp docs/PLAYERS.md dist/startropics/README.txt
 	@test -z "$(RCHEEVOS_SRC)" || cp third_party/rcheevos/LICENSE dist/startropics/LICENSE-rcheevos.txt
-	$(PYTHON) -c "import shutil; shutil.make_archive('dist/startropics-$(PLATFORM)', 'zip', 'dist', 'startropics')"
-	@echo "package: dist/startropics-$(PLATFORM).zip"
+	@test "$(DECK_EDITION)" != 1 || cp docs/STEAMDECK.md dist/startropics/STEAMDECK.txt
+	@test "$(WINDOWS)" = 1 || cp frontend/icon_preview.png dist/startropics/startropics.png
+	$(PYTHON) -c "import shutil; shutil.make_archive('dist/startropics-$(PLATFORM)', '$(ARCHIVE)', 'dist', 'startropics')"
+	@echo "package: dist/startropics-$(PLATFORM).$(if $(filter zip,$(ARCHIVE)),zip,tar.gz)"
 
 # ---- tests ----
 test: headless

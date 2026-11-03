@@ -6,6 +6,7 @@
 #include "nes.h"
 #include "png.h"
 #include "palette.h"
+#include "widescreen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@ static int watch_addr = -1;
 static void trace_hook(void) {
     fprintf(trace_file, "%04X A:%02X X:%02X Y:%02X P:%02X SP:%02X CYC:%llu",
             cpu.pc, cpu.a, cpu.x, cpu.y, cpu_get_p(0), cpu.sp, (unsigned long long)cpu.cycles);
+    fprintf(trace_file, " B:%02X,%02X", mapper.prg_bank[1], mapper.prg_bank[2]);   /* banks at $A000 / $C000 */
     if (watch_addr >= 0) fprintf(trace_file, " W:%02X", mem_read((uint16_t)watch_addr));
     fputc('\n', trace_file);
 }
@@ -85,6 +87,23 @@ static void fb_to_rgb(uint8_t *rgb) {
     }
 }
 
+static uint8_t wide_fb[WS_W * WS_H];
+
+/* the widescreen frame (centre = the PPU frame, bands = decoded map or black) as RGB */
+static int wide_to_rgb(uint8_t *rgb) {
+    int decoded = widescreen_render(wide_fb);
+    for (int y = 0; y < WS_H; y++) {
+        int emph = (ppu.line_emph[y] >> 5) & 7;
+        for (int x = 0; x < WS_W; x++) {
+            uint32_t c = pal[emph * 64 + (wide_fb[y * WS_W + x] & 0x3F)];
+            rgb[(y * WS_W + x) * 3] = (uint8_t)(c >> 16);
+            rgb[(y * WS_W + x) * 3 + 1] = (uint8_t)(c >> 8);
+            rgb[(y * WS_W + x) * 3 + 2] = (uint8_t)c;
+        }
+    }
+    return decoded;
+}
+
 static uint64_t fnv1a(uint64_t h, const void *data, size_t len) {
     const uint8_t *p = data;
     for (size_t i = 0; i < len; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
@@ -127,6 +146,8 @@ static void usage(void) {
         "  --input FILE        input script: lines of 'frame BTN+BTN'\n"
         "  --png FILE          write the last frame as PNG\n"
         "  --png-every N       write FILE with the frame number appended every N frames\n"
+        "  --widescreen FILE   write the last frame as a 448x240 PNG with the map decoded in the side bands\n"
+        "                      (also every N frames with --png-every); checks that the centre matches --png\n"
         "  --wav FILE          write audio to a 48 kHz WAV\n"
         "  --trace FILE        write a per-instruction trace (interpreter)\n"
         "  --nestest N         nestest mode: start at $C000 and run N instructions\n"
@@ -135,12 +156,13 @@ static void usage(void) {
         "  --recomp            run recompiled code with interpreter fallback\n"
         "  --frame-hash FILE   write a per-frame state hash (for cosimulation diffs)\n"
         "  --sav FILE          load/save battery RAM from FILE\n"
+        "  --ram-dump FILE     write RAM + PRG RAM at the end (with --ram-dump-every N: FILE.NNNNN.bin every N frames)\n"
         "  --quiet             no per-run summary\n");
 }
 
 int main(int argc, char **argv) {
-    const char *rom = NULL, *png = NULL, *wav = NULL, *trace = NULL, *cov = NULL, *hash = NULL, *sav = NULL, *input = NULL, *debug_log = NULL, *ram_dump = NULL;
-    int frames = 600, png_every = 0, nestest = 0, blargg = 0, recomp = 0, quiet = 0, trace_start = 0;
+    const char *rom = NULL, *png = NULL, *wav = NULL, *trace = NULL, *cov = NULL, *hash = NULL, *sav = NULL, *input = NULL, *debug_log = NULL, *ram_dump = NULL, *wide = NULL;
+    int frames = 600, png_every = 0, ram_dump_every = 0, nestest = 0, blargg = 0, recomp = 0, quiet = 0, trace_start = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
@@ -148,6 +170,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--input") && i + 1 < argc) input = argv[++i];
         else if (!strcmp(argv[i], "--png") && i + 1 < argc) png = argv[++i];
         else if (!strcmp(argv[i], "--png-every") && i + 1 < argc) png_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--widescreen") && i + 1 < argc) wide = argv[++i];
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace = argv[++i];
         else if (!strcmp(argv[i], "--nestest") && i + 1 < argc) nestest = atoi(argv[++i]);
@@ -161,6 +184,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace-start") && i + 1 < argc) trace_start = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--debug-log") && i + 1 < argc) debug_log = argv[++i];
         else if (!strcmp(argv[i], "--ram-dump") && i + 1 < argc) ram_dump = argv[++i];
+        else if (!strcmp(argv[i], "--ram-dump-every") && i + 1 < argc) ram_dump_every = atoi(argv[++i]);
         else { usage(); return 2; }
     }
     if (!rom) { usage(); return 2; }
@@ -207,6 +231,8 @@ int main(int argc, char **argv) {
     int16_t *audio = wav ? malloc(sizeof(int16_t) * 48000u * (size_t)(frames / 60 + 2)) : NULL;
     uint32_t audio_n = 0, audio_cap = wav ? 48000u * (uint32_t)(frames / 60 + 2) : 0;
     uint8_t *rgb = malloc(256 * 240 * 3);
+    uint8_t *rgb_wide = malloc(WS_W * WS_H * 3);
+    int wide_frames = 0, wide_decoded = 0, wide_mismatch = 0, wide_tiles = 0, wide_bad_tiles = 0, wide_pixels = 0, wide_bad_pixels = 0;
     int ev = 0;
     int blargg_result = -1;
     int reset_hold = 0;
@@ -223,11 +249,27 @@ int main(int argc, char **argv) {
         } else {
             apu.ring_read = apu.ring_write;
         }
+        if (ram_dump && ram_dump_every && (frame % ram_dump_every) == 0) {
+            char name[1100];
+            snprintf(name, sizeof name, "%s.%05d.bin", ram_dump, frame);
+            FILE *f = fopen(name, "wb");
+            if (f) { fwrite(ram, 1, sizeof ram, f); fwrite(cart.wram, 1, sizeof cart.wram, f); fclose(f); }
+        }
         if (png && png_every && (frame % png_every) == 0) {
             char name[1100];
             snprintf(name, sizeof name, "%s.%05d.png", png, frame);
             fb_to_rgb(rgb);
             png_write_rgb(name, 256, 240, rgb);
+        }
+        if (wide && png_every && (frame % png_every) == 0) {
+            char name[1100];
+            snprintf(name, sizeof name, "%s.%05d.png", wide, frame);
+            wide_decoded += wide_to_rgb(rgb_wide); wide_frames++;
+            png_write_rgb(name, WS_W, WS_H, rgb_wide);
+            int tiles, bp, tp, bad = widescreen_check(&tiles, &bp, &tp);
+            if (bad >= 0) { wide_tiles += tiles; wide_bad_tiles += bad; wide_pixels += tp; wide_bad_pixels += bp; }
+            if (!quiet) printf("frame %d: widescreen %s (%d of %d tiles differ from the nametable, %.2f%% of the pixels differ)\n", frame,
+                               bad < 0 ? "blank" : "decoded", bad < 0 ? 0 : bad, tiles, tp ? 100.0 * bp / tp : 0.0);
         }
         if (blargg && reset_hold > 0) { reset_hold--; continue; }
         if (blargg && cart.wram[1] == 0xDE && cart.wram[2] == 0xB0 && cart.wram[3] == 0x61) {
@@ -248,6 +290,22 @@ int main(int argc, char **argv) {
     }
 
     if (png) { fb_to_rgb(rgb); png_write_rgb(png, 256, 240, rgb); }
+    if (wide) {
+        /* the centre of the wide frame must be the normal frame, pixel for pixel */
+        int decoded = wide_to_rgb(rgb_wide);
+        wide_decoded += decoded; wide_frames++;
+        fb_to_rgb(rgb);
+        for (int y = 0; y < 240; y++)
+            if (memcmp(rgb + y * 256 * 3, rgb_wide + (y * WS_W + WS_BAND) * 3, 256 * 3) != 0) wide_mismatch++;
+        png_write_rgb(wide, WS_W, WS_H, rgb_wide);
+        int tiles, bp, tp, bad = widescreen_check(&tiles, &bp, &tp);
+        if (bad >= 0) { wide_tiles += tiles; wide_bad_tiles += bad; wide_pixels += tp; wide_bad_pixels += bp; }
+        printf("widescreen: %s, bands %s, centre %s the normal frame (%d of %d frames decoded)\n", wide,
+               decoded ? "decoded from the map" : "blank (scene not understood)",
+               wide_mismatch ? "DIFFERS from" : "identical to", wide_decoded, wide_frames);
+        printf("widescreen: decoder vs the game's own output over the decoded frames: %d of %d tiles differ, %.2f%% of the pixels (sprites)\n",
+               wide_bad_tiles, wide_tiles, wide_pixels ? 100.0 * wide_bad_pixels / wide_pixels : 0.0);
+    }
     if (wav) { write_wav(wav, audio, audio_n, 48000); free(audio); }
     if (hash_file) fclose(hash_file);
     if (trace_file && trace_file != stdout) fclose(trace_file);
@@ -272,6 +330,8 @@ int main(int argc, char **argv) {
                                    (unsigned long long)sys.native_blocks, (unsigned long long)sys.fallback_steps);
     }
     free(rgb);
+    free(rgb_wide);
+    if (wide && wide_mismatch) return 1;
     if (blargg) return blargg_result == 0 ? 0 : 1;
     return 0;
 }

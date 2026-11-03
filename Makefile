@@ -29,7 +29,7 @@ BUILD   ?= build
 GEN     := generated
 
 RUNTIME_SRC := runtime/cpu.c runtime/mem.c runtime/cart.c runtime/mapper.c runtime/ppu.c \
-               runtime/apu.c runtime/sys.c runtime/png.c runtime/palette.c
+               runtime/apu.c runtime/sys.c runtime/png.c runtime/palette.c runtime/widescreen.c
 RUNTIME_OBJ := $(patsubst runtime/%.c,$(BUILD)/%.o,$(RUNTIME_SRC))
 
 GEN_SRC := $(wildcard $(GEN)/*.c)
@@ -52,7 +52,7 @@ FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC))
 
 all: headless
 
-$(BUILD)/%.o: runtime/%.c runtime/nes.h
+$(BUILD)/%.o: runtime/%.c runtime/nes.h runtime/widescreen.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -87,7 +87,7 @@ $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
 	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(LDFLAGS)
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) -Iruntime -c $< -o $@
 

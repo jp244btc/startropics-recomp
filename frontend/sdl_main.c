@@ -36,6 +36,7 @@
 #include "audio_out.h"
 #include "input.h"
 #include "gpu_sync.h"
+#include "widescreen.h"
 
 #define FB_W 256
 #define FB_H 240
@@ -56,7 +57,7 @@ typedef struct {
     int window_size;     /* 1..6 */
     int display_mode;    /* 0 windowed, 1 fullscreen */
     int scaling;         /* 0 integer, 1 fit, 2 stretch */
-    int aspect;          /* 0 square pixels, 1 4:3, 2 16:9 */
+    int aspect;          /* 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen (map decoded beside the picture, black bars elsewhere) */
     int filter;          /* 0 nearest, 1 linear, 2 sharp */
     int overscan;        /* crop 8 lines top/bottom */
     int volume;          /* 0..100 */
@@ -76,8 +77,8 @@ static const char *const display_modes[] = { "Windowed", "Fullscreen", "Fullscre
 static const char *const runahead_names[] = { "Off", "1 frame", "2 frames", "3 frames" };
 static const char *const latency_names[]  = { "Low", "Normal", "Safe" };
 static const char *const window_sizes[]  = { "1x", "2x", "3x", "4x", "5x", "6x" };
-static const char *const scalings[]      = { "Integer", "Fit window", "Stretch" };
-static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (stretched)" };
+static const char *const scalings[]      = { "Integer", "Fit window", "Stretch (distorts)" };
+static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (widescreen)" };
 static const char *const filters[]       = { "Nearest", "Linear", "Sharp" };
 static const char *const onoff[]         = { "Off", "On" };
 
@@ -96,13 +97,16 @@ static char rom_name[256];            /* ROM file name without extension, for sa
 static char sav_path[2048], state_path[2048];
 static char rom_status[240];
 static uint32_t palette[512];
-static uint32_t frame_rgb[FB_W * FB_H];
+static uint32_t frame_rgb[WS_W * FB_H];   /* frame_w pixels wide */
+static uint8_t wide_fb[WS_W * WS_H];      /* the frame with the decoded side bands */
+static int frame_w = FB_W;                /* width of the frame in frame_rgb: 256, or WS_W in widescreen mode */
 static uint8_t wram_snapshot[8192];
 static SDL_Window *window;
 static SDL_Renderer *renderer;
-static SDL_Texture *game_tex;         /* 256x240 game frame */
+static SDL_Texture *game_tex;         /* frame_w x 240 game frame */
+static int tex_w;                     /* width game_tex was created with */
 static SDL_Texture *sharp_tex;        /* integer-prescaled target for the sharp filter */
-static int sharp_k;
+static int sharp_k, sharp_w;
 static int tex_filter = -1;
 static SDL_Texture *bg_tex;           /* optional launcher-background.bmp next to the executable */
 static int bg_w, bg_h;
@@ -182,8 +186,8 @@ static void write_config(void) {
     for (int i = 0; i < K_COUNT; i++) fprintf(f, "pad_%s=%s\n", key_names[i], input_pad_name(cfg.pad[i]));
     fprintf(f, "window_size=%d\n", cfg.window_size);
     fprintf(f, "display_mode=%d        ; 0 windowed, 1 fullscreen\n", cfg.display_mode);
-    fprintf(f, "scaling=%d             ; 0 integer, 1 fit window, 2 stretch\n", cfg.scaling);
-    fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3, 2 16:9\n", cfg.aspect);
+    fprintf(f, "scaling=%d             ; 0 integer, 1 fit window, 2 stretch (distorts)\n", cfg.scaling);
+    fprintf(f, "aspect=%d              ; 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen (map decoded beside the picture, black bars elsewhere)\n", cfg.aspect);
     fprintf(f, "filter=%d              ; 0 nearest, 1 linear, 2 sharp\n", cfg.filter);
     fprintf(f, "overscan=%d            ; crop 8 lines at the top and bottom\n", cfg.overscan);
     fprintf(f, "low_latency=%d         ; pace on the display's vblank with frame delay (60/120 Hz displays)\n", cfg.lowlat);
@@ -243,6 +247,10 @@ static void load_config(void) {
 /* ------------------------------------------------------------------ */
 /* video                                                               */
 /* ------------------------------------------------------------------ */
+/* the 16:9 aspect choice is the widescreen mode: the map decoded beside the picture where
+   the scene format is known, the normal 4:3 picture between black bars elsewhere, never a stretch */
+static int widescreen_on(void) { return cfg.aspect == 2; }
+
 static double target_aspect(int src_h) {
     switch (cfg.aspect) {
     case 1: return 4.0 / 3.0;
@@ -251,12 +259,20 @@ static double target_aspect(int src_h) {
     }
 }
 
-/* width of a pixel relative to its height: square, or the 4:3 CRT look (the
-   "16:9 stretched" choice means the CRT look once the bands make the picture 16:9) */
+/* width of a pixel relative to its height: square, or the 4:3 CRT look, which the
+   16:9 mode keeps (it adds picture at the sides instead of changing the pixel shape) */
+static double pixel_aspect(void) { return cfg.aspect == 0 ? 1.0 : 1.25; }
 
 static void source_rect(SDL_Rect *src) {
-    src->x = 0; src->y = cfg.overscan ? OVERSCAN : 0;
-    src->w = FB_W; src->h = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
+    src->y = cfg.overscan ? OVERSCAN : 0;
+    src->h = cfg.overscan ? FB_H - 2 * OVERSCAN : FB_H;
+    if (widescreen_on()) {
+        /* the part of the decoded frame that makes a 16:9 picture at this pixel aspect */
+        src->w = widescreen_visible_width(src->h, pixel_aspect());
+        src->x = (WS_W - src->w) / 2;
+    } else {
+        src->x = 0; src->w = FB_W;
+    }
 }
 
 static void dest_rect(int ww, int wh, const SDL_Rect *src, SDL_Rect *dst) {
@@ -277,26 +293,33 @@ static void dest_rect(int ww, int wh, const SDL_Rect *src, SDL_Rect *dst) {
 }
 
 static void ensure_textures(int k) {
-    if (tex_filter != cfg.filter || !game_tex) {
+    if (tex_filter != cfg.filter || !game_tex || tex_w != frame_w) {
         if (game_tex) SDL_DestroyTexture(game_tex);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, cfg.filter == 1 ? "1" : "0");
-        game_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, FB_W, FB_H);
+        game_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, frame_w, FB_H);
         tex_filter = cfg.filter;
+        tex_w = frame_w;
     }
-    if (cfg.filter == 2 && (k != sharp_k || !sharp_tex)) {
+    if (cfg.filter == 2 && (k != sharp_k || sharp_w != frame_w || !sharp_tex)) {
         if (sharp_tex) SDL_DestroyTexture(sharp_tex);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-        sharp_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, FB_W * k, FB_H * k);
+        sharp_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, frame_w * k, FB_H * k);
         sharp_k = k;
+        sharp_w = frame_w;
     }
 }
 
+/* the PPU frame (or, in widescreen mode, the frame with the map decoded into the side
+   bands) as ARGB in frame_rgb, frame_w pixels wide */
 static void frame_to_rgb(void) {
+    const uint8_t *fb = ppu.fb;
+    frame_w = FB_W;
+    if (widescreen_on()) { widescreen_render(wide_fb); fb = wide_fb; frame_w = WS_W; }
     for (int y = 0; y < FB_H; y++) {
         const uint32_t *pal = palette + ((ppu.line_emph[y] >> 5) & 7) * 64;
-        const uint8_t *src = ppu.fb + y * FB_W;
-        uint32_t *dst = frame_rgb + y * FB_W;
-        for (int x = 0; x < FB_W; x++) dst[x] = 0xFF000000u | pal[src[x] & 0x3F];
+        const uint8_t *src = fb + y * frame_w;
+        uint32_t *dst = frame_rgb + y * frame_w;
+        for (int x = 0; x < frame_w; x++) dst[x] = 0xFF000000u | pal[src[x] & 0x3F];
     }
 }
 
@@ -322,16 +345,16 @@ static void draw_game_ex(int backdrop) {
     int k = (dst.h + src.h - 1) / src.h;
     if (k < 1) k = 1;
     if (k > 8) k = 8;
-    ensure_textures(k);
     frame_to_rgb();
-    SDL_UpdateTexture(game_tex, NULL, frame_rgb, FB_W * (int)sizeof(uint32_t));
+    ensure_textures(k);
+    SDL_UpdateTexture(game_tex, NULL, frame_rgb, frame_w * (int)sizeof(uint32_t));
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
     if (cfg.filter == 2 && sharp_tex) {
         SDL_SetRenderTarget(renderer, sharp_tex);
         SDL_RenderCopy(renderer, game_tex, NULL, NULL);
         SDL_SetRenderTarget(renderer, NULL);
-        SDL_Rect src2 = { 0, src.y * sharp_k, FB_W * sharp_k, src.h * sharp_k };
+        SDL_Rect src2 = { src.x * sharp_k, src.y * sharp_k, src.w * sharp_k, src.h * sharp_k };
         SDL_RenderCopy(renderer, sharp_tex, &src2, &dst);
     } else {
         SDL_RenderCopy(renderer, game_tex, &src, &dst);
@@ -445,9 +468,16 @@ static int write_png_rgb32(const char *path, const uint32_t *px, int w, int h) {
     return r;
 }
 
+/* the picture as shown (full height; in widescreen mode the visible part of the wide frame) */
 static int write_frame_png(const char *path) {
     frame_to_rgb();
-    return write_png_rgb32(path, frame_rgb, FB_W, FB_H);
+    SDL_Rect src;
+    source_rect(&src);
+    uint32_t *px = malloc((size_t)src.w * FB_H * sizeof(uint32_t));
+    for (int y = 0; y < FB_H; y++) memcpy(px + (size_t)y * src.w, frame_rgb + (size_t)y * frame_w + src.x, (size_t)src.w * sizeof(uint32_t));
+    int r = write_png_rgb32(path, px, src.w, FB_H);
+    free(px);
+    return r;
 }
 
 /* screenshot of the whole window (used for the UI self-test) */

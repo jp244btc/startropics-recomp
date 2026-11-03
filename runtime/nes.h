@@ -100,7 +100,12 @@ typedef struct {
     /* sprites evaluated for the next line */
     uint8_t  spr_count_next;
     bool     spr0_next;
-    uint8_t  line_emph[240];    /* mask emphasis/grayscale bits per line */
+    uint8_t  line_emph[240];    /* $2001 (mask) at the start of each visible line: emphasis, grayscale, enables */
+    /* scroll (loopy t and fine x), control register and CHR banks at the start of the
+       visible frame, for re-rendering the frame's background (widescreen.c) */
+    uint16_t frame_t;
+    uint8_t  frame_x, frame_ctrl;
+    uint16_t frame_chr_bank[8];
     uint8_t  fb[256 * 240];     /* 6-bit palette index per pixel */
 } ppu_t;
 
@@ -265,6 +270,7 @@ void    mapper_write_rom(uint16_t a, uint8_t v);
 void    mapper_ppu_addr(uint16_t addr);
 void    mapper_update_pointers(void);
 void    mapper_set_mirroring(int mode);    /* 0=H 1=V 2=single lo 3=single hi 4=four */
+uint8_t *mapper_chr_bank_ptr(uint32_t bank1k); /* data of a 1 KiB CHR bank (ROM or RAM) */
 
 /* ppu.c */
 void    ppu_reset(void);

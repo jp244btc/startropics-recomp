@@ -14,7 +14,7 @@ static uint8_t *prg_bank_ptr(uint32_t bank8k) {
     return cart.prg + (bank8k % count) * 8192;
 }
 
-static uint8_t *chr_bank_ptr(uint32_t bank1k) {
+uint8_t *mapper_chr_bank_ptr(uint32_t bank1k) {
     if (cart.chr_size == 0) return cart.chr_ram + (bank1k % 8) * 1024;
     uint32_t count = cart.chr_size / 1024;
     return cart.chr + (bank1k % count) * 1024;
@@ -97,7 +97,7 @@ void mapper_update_pointers(void) {
         break;
     }
     for (int i = 0; i < 4; i++) mapper.prg_ptr[i] = prg_bank_ptr(mapper.prg_bank[i]);
-    for (int i = 0; i < 8; i++) mapper.chr_ptr[i] = chr_bank_ptr(mapper.chr_bank[i]);
+    for (int i = 0; i < 8; i++) mapper.chr_ptr[i] = mapper_chr_bank_ptr(mapper.chr_bank[i]);
 }
 
 void mapper_init(void) {

@@ -224,7 +224,14 @@ static inline void ppu_tick(void) {
             ppu.status &= 0x1F;
             ppu_update_nmi();
         }
-        if (visible && dot == 1) ppu.line_emph[sl] = ppu.mask & 0xE1;
+        if (visible && dot == 1) {
+            ppu.line_emph[sl] = ppu.mask;
+            if (sl == 0) {   /* what this frame's background is drawn with */
+                /* t, not v: v has already been advanced by the two prefetched tiles */
+                ppu.frame_t = ppu.t; ppu.frame_x = ppu.x; ppu.frame_ctrl = ppu.ctrl;
+                memcpy(ppu.frame_chr_bank, mapper.chr_bank, sizeof ppu.frame_chr_bank);
+            }
+        }
 
         if (render) {
             if (dot >= 1 && dot <= 256) {

@@ -142,8 +142,25 @@ Other simplifications: sprite evaluation is done in one step at dot 257
 not enforced, DMC DMA does not stall the CPU, and the APU uses a box-filter
 resampler plus the 90 Hz / 440 Hz high-pass and 14 kHz low-pass stages.
 
+## Widescreen
+
+`runtime/widescreen.c` draws 96 extra pixels on each side of the frame from the
+overworld's own map data (format in `docs/MAP_FORMATS.md`): the scene is
+recognised from the game-mode variables, the camera is derived from the player
+position and the scroll the PPU latched for the frame (`ppu.frame_t`,
+`frame_x`, `frame_ctrl`, `frame_chr_bank`, snapshotted at scanline 0), and each
+16 x 16 cell is decoded through the same screen-grid / row / metatile / variant
+path the game's strip drawer uses. `ppu.line_emph` now keeps the whole `$2001`
+value per line so lines the game blanks stay blank in the bands. The headless
+harness (`--widescreen`) checks the decoder against the PPU's nametables and
+pixels. The frontend's "16:9 (widescreen)" aspect choice shows this frame; other
+scene types (dungeon rooms with the status-bar split) are not decoded and get
+black bars around the normal picture; the IRQ modes are described in the formats file.
+
 ## Where to take it next
 
+* Decode the dungeon room format (IRQ modes 3/4, `$8200` split) so the status
+  bar can move into the side band and rooms get widescreen too.
 * Play further with coverage recording to translate the remaining routines
   (the first dungeon, bosses, later chapters) and extend the cosimulation script.
 * Hooks keyed by ROM address (a `patches/` layer called from the dispatcher)

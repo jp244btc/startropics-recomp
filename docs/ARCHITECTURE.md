@@ -246,8 +246,10 @@ drew. Ramps have 13 shades per color and emphasis setting, stepped in OKLCH (lig
 by 24 % of the remaining distance per step upward, hues turning toward blue in shadow and
 toward yellow in light), from a remastered base palette; backgrounds have a few colors
 of their own (the NES's pink beaches are sand there, sprites keep the pink). Automatic
-inks come from each tile's 8x8 pattern; a pack ("STRM" version 1: tile, layer, 64 inks)
-overrides them per tile and layer.
+inks come from each tile's 8x8 pattern; tiles that look like lettering (color 0 and one
+other color, in strokes with no 4x4 square forming at most three connected shapes, which
+speckled textures exceed) keep their colors flat. A pack ("STRM" version 1: tile, layer,
+64 inks) overrides them per tile and layer.
 
 **RetroAchievements.** `achievements.c` wraps rc_client: memory reads go through
 `nes_peek` (no side effects, CPU addresses), HTTP requests run on worker threads

@@ -257,7 +257,8 @@ the tile's four palette colors, a number of steps darker or lighter. Inks are
 relative to the palette, so the game's palette swaps, fades and color cycling keep
 working. Out of the box the inks are worked out from each tile's own pattern (a
 region is lit where its edge faces up or left and shaded where it faces down or
-right), and the colors StarTropics leans on most get natural tones: an ocean blue,
+right; lettering, told apart by its thin strokes in one color, stays flat and crisp),
+and the colors StarTropics leans on most get natural tones: an ocean blue,
 grass and forest greens, warm browns, and sand where the NES has pink beaches. The
 widescreen view's decoded map is remastered the same way. The steps are computed in
 OKLCH, so each one is an even change of lightness and pale colors deepen instead of

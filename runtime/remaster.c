@@ -18,9 +18,11 @@
  * Automatic inks, from the tile's own 8x8 pattern: a pixel inside a region of one color is lit
  * one step where the region's edge faces up or left and shaded one step where it faces down or
  * right; pixels of a texture (fewer than two neighbors of their color) and a sprite's outline
- * (next to transparency) keep their color. Neighbors beyond the tile count as the same color, so
- * a region spanning tiles shows no seam. An ink that names the pixel's own color takes the
- * color the PPU actually drew, so mid-frame palette changes stay right.
+ * (next to transparency) keep their color. Lettering (color 0 and one other color in thin strokes
+ * forming at most three shapes: letters, digits, box borders) keeps its colors throughout, so text
+ * stays crisp instead of embossed. Neighbors beyond the tile count as the same color, so a region
+ * spanning tiles shows no seam. An ink that names the pixel's own color takes the color the PPU
+ * actually drew, so mid-frame palette changes stay right.
  *
  * Pack: "STRM", version 1, a tile count, then per tile: its number in the CHR ROM (16-bit), the
  * layer it applies to (0 background, 1 sprites, 2 both) and its 64 inks (remaster.h), row by row.
@@ -194,10 +196,48 @@ static void build_ramps(void) {
 }
 
 /* ---- automatic inks ---- */
+
+/* lettering: color 0 and one other color, in thin strokes (no 4x4 square of it) that form at most
+   three connected shapes, as letters, digits and box borders do; speckled textures have many */
+static int lettering(const int v[8][8]) {
+    int used = 0, f, shapes = 0, seen[8][8] = { { 0 } }, stack[64][2];
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) used |= 1 << v[y][x];
+    if (used != 3 && used != 5 && used != 9) return 0;
+    f = used & 2 ? 1 : used & 4 ? 2 : 3;
+    for (int y0 = 0; y0 <= 4; y0++)
+        for (int x0 = 0; x0 <= 4; x0++) {
+            int all = 1;
+            for (int j = 0; j < 16 && all; j++) all = v[y0 + j / 4][x0 + j % 4] == f;
+            if (all) return 0;
+        }
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+            int n = 0;
+            if (v[y][x] != f || seen[y][x]) continue;
+            if (++shapes > 3) return 0;
+            seen[y][x] = 1;
+            stack[n][0] = x; stack[n][1] = y; n++;
+            while (n) {   /* the shape, through its 8 neighbors */
+                int cx = stack[n - 1][0], cy = stack[n - 1][1];
+                n--;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int nx = cx + dx, ny = cy + dy;
+                        if (nx < 0 || nx > 7 || ny < 0 || ny > 7 || v[ny][nx] != f || seen[ny][nx]) continue;
+                        seen[ny][nx] = 1;
+                        stack[n][0] = nx; stack[n][1] = ny; n++;
+                    }
+            }
+        }
+    return 1;
+}
+
 static void auto_tile(const uint8_t *t, uint8_t *bg, uint8_t *spr) {
     int v[8][8];
     for (int y = 0; y < 8; y++)
         for (int x = 0; x < 8; x++) v[y][x] = ((t[y] >> (7 - x)) & 1) | (((t[y + 8] >> (7 - x)) & 1) << 1);
+    int flat = lettering(v);
     for (int y = 0; y < 8; y++)
         for (int x = 0; x < 8; x++) {
             int c = v[y][x];
@@ -206,7 +246,7 @@ static void auto_tile(const uint8_t *t, uint8_t *bg, uint8_t *spr) {
             int same = (up == c) + (down == c) + (left == c) + (right == c);
             int lit = (up != c) + (left != c), shade = (down != c) + (right != c);
             int step = 4;
-            if (same >= 2) step += (lit > shade) - (shade > lit);
+            if (same >= 2 && !flat) step += (lit > shade) - (shade > lit);
             bg[y * 8 + x] = REMASTER_INK(c, step);
             if (c == 0) { spr[y * 8 + x] = 0; continue; }
             int outline = up == 0 || down == 0 || left == 0 || right == 0;

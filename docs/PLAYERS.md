@@ -94,7 +94,8 @@ Remastered textures
 -------------------
 Textures: Remastered colors and shades every tile of the game as it is drawn: more
 colors per tile, light from the upper left, shadows that lean toward blue and lights
-toward yellow, and natural tones for the sea, the grass and the sand. It is worked out
+toward yellow, and natural tones for the sea, the grass and the sand, while text stays
+crisp. It is worked out
 from your ROM's own tiles while you play, and the widescreen view's map gets it too.
 A hand-made tile pack (remaster.pak) can replace that tile by tile: put it in the
 program's folder (Android: Android/data/<package>/files) and it is used whenever

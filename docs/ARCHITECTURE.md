@@ -22,6 +22,8 @@ runtime/mapper.c     NROM, MMC1 (for test ROMs), MMC3/MMC6 with scanline IRQ and
 runtime/mem.c        CPU bus: PPU/APU/controller registers, OAM DMA, PRG RAM
 runtime/cart.c       iNES / NES 2.0 loader, SHA-1/CRC32, MMC6 detection, battery file
 runtime/sys.c        power/reset, frame loop, save states
+runtime/widescreen.c the overworld map decoded beside the picture (MAP_FORMATS.md)
+runtime/remaster.c   remastered textures: ramps, automatic inks, the tile pack, frame coloring
 runtime/headless.c   command-line harness (tests, scripting, screenshots, traces, coverage)
 runtime/recomp_rt.h  helpers used by the generated code
 recomp/recomp.py     the static recompiler
@@ -226,6 +228,24 @@ filtered, alpha black) and the vignette; then the target is drawn to the window
 either 1:1, scaled, or as a 32x24 mesh with barrel distortion
 (`SDL_RenderGeometry`), and the aperture mask (one texel per screen pixel, MOD
 blend) goes on top.
+
+**Remastered textures.** With `ppu_hd_capture` set the PPU records, beside each pixel
+of the frame, the source of the background and the sprite pixel at that spot
+(`ppu.hd_bg` / `hd_spr`, outside the save state): the CHR ROM tile, its row and column,
+the palette, the 2-bit value, the flips and the priority. The background column comes
+from the fine X scroll plus the shifts since the last reload, the sprite column from a
+per-sprite counter (mirrored for horizontal flips). `widescreen_render_hd` fills the same
+records for the decoded map. `remaster_frame` then colors each pixel from the ink its
+source tile gives that pixel (remaster.h: color 0-3, step 1-7, a half-step bit): the
+tile's palette entry for that color, looked up on that color's ramp, so palette changes
+carry over; an ink that names the pixel's own value takes the color the PPU actually
+drew. Ramps have 13 shades per color and emphasis setting, stepped in OKLCH (lightness
+±0.085 per step downward with the saturation easing toward a common level, toward white
+by 24 % of the remaining distance per step upward, hues turning toward blue in shadow and
+toward yellow in light), from a remastered base palette; backgrounds have a few colors
+of their own (the NES's pink beaches are sand there, sprites keep the pink). Automatic
+inks come from each tile's 8x8 pattern; a pack ("STRM" version 1: tile, layer, 64 inks)
+overrides them per tile and layer.
 
 **RetroAchievements.** `achievements.c` wraps rc_client: memory reads go through
 `nes_peek` (no side effects, CPU addresses), HTTP requests run on worker threads

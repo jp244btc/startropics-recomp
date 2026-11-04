@@ -40,10 +40,11 @@ borderless fullscreen), window size 1x-6x, scaling (integer / fit / stretch), as
 ratio (square pixels 8:7, 4:3 CRT, 16:9 or 16:10 widescreen: below), filter
 (nearest / linear / sharp), CRT-style shaders (scanlines, aperture mask, glow,
 curvature; three strengths), overscan crop, a no-sprite-limit mode (every sprite
-on a line is drawn, so nothing flickers), volume, and rebinding of the eight NES
-buttons and the rewind key. Nine save state slots, rewind (hold a key to step
-back through the last minutes of play) and RetroAchievements (log in on the
-Achievements tab; unlocks pop up in game; hardcore mode supported) are built in.
+on a line is drawn, so nothing flickers), remastered textures (below), volume,
+and rebinding of the eight NES buttons and the rewind key. Nine save state
+slots, rewind (hold a key to step back through the last minutes of play) and
+RetroAchievements (log in on the Achievements tab; unlocks pop up in game;
+hardcore mode supported) are built in.
 A line under the Graphics rows reports the picture the settings produce and why it
 does not fill the screen when it does not (integer multiples, or a 16:9 picture on a
 16:10 screen). The window works in real pixels on high-DPI displays (per-monitor DPI
@@ -239,6 +240,31 @@ emulated memory through a side-effect-free peek, HTTP runs on worker threads
 (WinHTTP on Windows, libcurl elsewhere when available) and only the session
 token is stored. Hardcore mode disables save state loading and rewind.
 
+### Remastered textures
+
+Graphics > Textures > Remastered redraws the game the way the Pixel Remaster
+editions of the early Final Fantasy games redid their 8-bit art: the same pixel grid,
+many more colors per tile, and shading in hue-shifted steps (shadows lean toward
+blue, lights toward yellow). The PPU records for every pixel which cartridge tile,
+row, column and palette it came from, and each pixel of a tile takes an "ink": one of
+the tile's four palette colors, a number of steps darker or lighter. Inks are
+relative to the palette, so the game's palette swaps, fades and color cycling keep
+working. Out of the box the inks are worked out from each tile's own pattern (a
+region is lit where its edge faces up or left and shaded where it faces down or
+right), and the colors StarTropics leans on most get natural tones: an ocean blue,
+grass and forest greens, warm browns, and sand where the NES has pink beaches. The
+widescreen view's decoded map is remastered the same way. The steps are computed in
+OKLCH, so each one is an even change of lightness and pale colors deepen instead of
+turning garish; the cost is well under a millisecond a frame.
+
+A pack of hand-made tiles, `remaster.pak`, replaces the automatic inks tile by tile.
+Packs are made with `tools/remaster/remaster_art.py` from frames that
+`nes-headless --hd-dump` writes (each pixel's source tile): art painted over a frame
+is mapped back to the tiles that drew it. Because a pack is drawn over the
+cartridge's own tiles it belongs with your copy of the game; none is included here.
+The program loads `remaster.pak` from its own folder or its data folder (on Android,
+the app's files folder on the shared storage).
+
 ## How it works
 
 * `recomp/recomp.py` parses the iNES header, finds code by recursive descent from
@@ -253,7 +279,8 @@ token is stored. Hardcore mode disables save state loading and rewind.
   filters, the MMC6 mapper with its 1 KiB protected RAM, and a 6502 interpreter
   that doubles as the fallback for untranslated code and as the reference model.
   The generated code and the interpreter share the same inline helpers, which is
-  what makes exact cosimulation possible.
+  what makes exact cosimulation possible. `runtime/remaster.c` colors the
+  remastered textures from the PPU's per-pixel record of each pixel's source tile.
 * `frontend/sdl_main.c` is the player: window, audio, input, saves, states,
   rewind, shaders; `frontend/achievements.c` is the RetroAchievements glue.
 

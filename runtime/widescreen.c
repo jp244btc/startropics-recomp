@@ -205,13 +205,20 @@ static int overworld_setup(mapset_t *m, int *camx_out, int *camy_out) {
     return 1;
 }
 
+/* the tile of the CHR ROM image a pattern row pointer lies in (HD_TILE_NONE outside it) */
+static uint32_t chr_tile(const uint8_t *row) {
+    if (!cart.chr || row < cart.chr || row >= cart.chr + cart.chr_size) return HD_TILE_NONE;
+    return (uint32_t)(row - cart.chr) >> 4;
+}
+
 /* Draws the map under the rectangle [px0, px0 + width) x [py0, py0 + height) of the picture's
    coordinates (the PPU's picture is 0-255 x 0-239; the rectangle may lie beyond it on any side,
    at most WS_W wide) into dst (stride bytes per line) the way the PPU draws the background: from
    the frame's CHR banks and pattern table and the current palette, with masks[r] as row r's
-   $2001 bits (background enable, grayscale). Returns 0 when the map data is unreadable. */
+   $2001 bits (background enable, grayscale); hdst (or NULL) gets each pixel's source tile for the
+   enhanced graphics. Returns 0 when the map data is unreadable. */
 static int render_block(mapset_t *m, int camx, int camy, int px0, int py0, int width, int height,
-                        const uint8_t *masks, uint8_t *dst, int stride) {
+                        const uint8_t *masks, uint8_t *dst, uint32_t *hdst, int stride) {
     enum { MAX_COLS = WS_W / 16 + 2 };
     cell_t cells[MAX_COLS];
     if (width <= 0 || height <= 0) return 1;
@@ -225,8 +232,13 @@ static int render_block(mapset_t *m, int camx, int camy, int px0, int py0, int w
 
     for (int y = 0; y < height; y++) {
         uint8_t mask = masks[y], *line = dst + y * stride;
+        uint32_t *hline = hdst ? hdst + y * stride : NULL;
         uint8_t gray = (mask & 1) ? 0x30 : 0xFF, backdrop = ppu.palette[0] & gray;
-        if (!(mask & 0x08)) { memset(line, backdrop, (size_t)width); continue; }   /* background disabled on this line */
+        if (!(mask & 0x08)) {   /* background disabled on this line */
+            memset(line, backdrop, (size_t)width);
+            if (hline) memset(hline, 0, (size_t)width * sizeof *hline);
+            continue;
+        }
         int wy = camy + py0 + y, wrow = floordiv(wy, 16), ly = wy - wrow * 16;
         if (wrow != cell_row) {   /* the cells of a metatile row, looked up once for its 16 lines */
             for (int c = 0; c < ncols; c++) lookup_cell(m, col0 + c, wrow, &cells[c]);
@@ -241,14 +253,17 @@ static int render_block(mapset_t *m, int camx, int camy, int px0, int py0, int w
             const cell_t *cell = &cells[wcol - col0];
             if (!cell->valid) {
                 memset(line + x, backdrop, (size_t)run);
+                if (hline) memset(hline + x, 0, (size_t)run * sizeof *hline);
             } else {
                 unsigned a = pt_base + cell->tiles[ty * 2 + (lx >> 3)] * 16u + frow;
                 const uint8_t *pt = chr[(a >> 10) & 7] + (a & 0x3FF);
                 const uint8_t *pal = ppu.palette + cell->pal * 4;
+                uint32_t tile = chr_tile(pt);
                 for (int i = 0; i < run; i++) {
                     int bit = 7 - fine - i;
                     int pix = ((pt[0] >> bit) & 1) | (((pt[8] >> bit) & 1) << 1);
                     line[x + i] = (pix ? pal[pix] : ppu.palette[0]) & gray;
+                    if (hline) hline[x + i] = HD_PACK(tile, frow, fine + i, cell->pal, pix);
                 }
             }
             x += run;
@@ -264,7 +279,7 @@ static int objects_on = 1, objects_drawn;
    canvas the caller renders, through the row masks in emph (sprites enabled, grayscale). With
    outside_only, only pixels the PPU could not draw: beyond the 256 columns or on lines it left blank. */
 static void draw_sprite(const uint8_t *const chr[8], uint8_t tile, uint8_t attr, int sx, int sy, int outside_only,
-                        uint8_t *out, const uint8_t *emph, int px0, int py0, int w, int h) {
+                        uint8_t *out, uint32_t *hspr, const uint8_t *emph, int px0, int py0, int w, int h) {
     for (int r = 0; r < 16; r++) {
         int line = sy + r, row = line - py0;
         if (row < 0 || row >= h || !(emph[row] & 0x10)) continue;
@@ -273,13 +288,16 @@ static void draw_sprite(const uint8_t *const chr[8], uint8_t tile, uint8_t attr,
         unsigned a = ((tile & 1) ? 0x1000u : 0) + ((tile & 0xFEu) + (fr >> 3)) * 16u + (fr & 7);
         const uint8_t *pt = chr[(a >> 10) & 7] + (a & 0x3FF);
         uint8_t gray = (emph[row] & 1) ? 0x30 : 0xFF;
+        uint32_t src = chr_tile(pt), flips = ((attr & 0x40) ? HD_HFLIP : 0) | ((attr & 0x80) ? HD_VFLIP : 0);
         for (int c = 0; c < 8; c++) {
             int px = sx + c, col = px - px0;
             if (col < 0 || col >= w) continue;
             if (outside_only && drawn_line && px >= 0 && px < 256) continue;   /* the PPU drew this pixel */
             int bit = (attr & 0x40) ? c : 7 - c;
             int pix = ((pt[0] >> bit) & 1) | (((pt[8] >> bit) & 1) << 1);
-            if (pix) out[(size_t)row * w + col] = ppu.palette[16 + (attr & 3) * 4 + pix] & gray;
+            if (!pix) continue;
+            out[(size_t)row * w + col] = ppu.palette[16 + (attr & 3) * 4 + pix] & gray;
+            if (hspr) hspr[(size_t)row * w + col] = HD_PACK(src, fr & 7, 7 - bit, attr & 3, pix) | flips;
         }
     }
 }
@@ -294,7 +312,7 @@ static void draw_sprite(const uint8_t *const chr[8], uint8_t tile, uint8_t attr,
    the right edge and below the last line drawn. The game builds the sprites one frame ahead of
    the picture, with the camera the picture shows (camx, camy), so what the PPU drew follows from
    the window around that camera; the object variables may already be a frame further. */
-static void draw_objects(int camx, int camy, uint8_t *out, const uint8_t *emph, int px0, int py0, int w, int h) {
+static void draw_objects(int camx, int camy, uint8_t *out, uint32_t *hspr, const uint8_t *emph, int px0, int py0, int w, int h) {
     objects_drawn = 0;
     if (!objects_on || !(ppu.frame_ctrl & 0x20) || (ram[RAM_SCENE_REQ] & 0x7F)) return;   /* 8x16 sprites; no scene change pending */
     if (cart.prg_size < (OBJ_TABLE_BANK + 1) * 8192u) return;
@@ -346,8 +364,8 @@ static void draw_objects(int camx, int camy, uint8_t *out, const uint8_t *emph, 
         if (flip) { tb = tile; ta = (uint8_t)(tile + 2); attr = pal | 0x40; }
         else { ta = tile; tb = (uint8_t)(tile + 2); attr = pal; }
         int a_drawn = shown && sx >= 8, b_drawn = shown && sx < 256;
-        draw_sprite(chr, ta, attr, sx - 8, sy, a_drawn, out, emph, px0, py0, w, h);
-        draw_sprite(chr, tb, attr, sx, sy, b_drawn, out, emph, px0, py0, w, h);
+        draw_sprite(chr, ta, attr, sx - 8, sy, a_drawn, out, hspr, emph, px0, py0, w, h);
+        draw_sprite(chr, tb, attr, sx, sy, b_drawn, out, hspr, emph, px0, py0, w, h);
         if (!a_drawn || !b_drawn) objects_drawn++;
     }
 }
@@ -356,7 +374,22 @@ void widescreen_objects(int on) { objects_on = on; }
 int widescreen_objects_drawn(void) { return objects_drawn; }
 
 int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
+    return widescreen_render_hd(out, emph, NULL, NULL, x, y, w, h);
+}
+
+/* the PPU's own sources for n rows of the picture's columns [c0, c1), into the canvas rows at dst */
+static void copy_sources(uint32_t *hbg, uint32_t *hspr, int w, int ly, int n, int c0, int c1, int px0) {
+    if (!hbg) return;
+    for (int i = 0; i < n; i++) {
+        size_t d = (size_t)i * w + (c0 - px0), sidx = (size_t)(ly + i) * 256 + c0;
+        memcpy(hbg + d, ppu.hd_bg + sidx, (size_t)(c1 - c0) * sizeof *hbg);
+        memcpy(hspr + d, ppu.hd_spr + sidx, (size_t)(c1 - c0) * sizeof *hspr);
+    }
+}
+
+int widescreen_render_hd(uint8_t *out, uint8_t *emph, uint32_t *hbg, uint32_t *hspr, int x, int y, int w, int h) {
     int px0 = x - WS_BAND, py0 = y - WS_VBAND;   /* the rectangle in the picture's coordinates */
+    if (hbg) { memset(hbg, 0, (size_t)w * h * sizeof *hbg); memset(hspr, 0, (size_t)w * h * sizeof *hspr); }
     int c0 = px0 > 0 ? px0 : 0, c1 = px0 + w < 256 ? px0 + w : 256;   /* the picture's columns in it */
     if (c0 > px0 + w) c0 = px0 + w;
     if (c1 < c0) c1 = c0;
@@ -381,20 +414,24 @@ int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
                 n++;
             }
             uint8_t *dst = out + (size_t)r * w;
+            uint32_t *hdst = hbg ? hbg + (size_t)r * w : NULL, *hsdst = hspr ? hspr + (size_t)r * w : NULL;
             if (!drawn) {   /* the map across the whole width */
-                ok = render_block(&m, camx, camy, px0, ly, w, n, emph + r, dst, w);
+                ok = render_block(&m, camx, camy, px0, ly, w, n, emph + r, dst, hdst, w);
             } else {        /* the PPU's pixels, the map beside them */
-                if (px0 < c0) ok = render_block(&m, camx, camy, px0, ly, c0 - px0, n, emph + r, dst, w);
-                if (ok && c1 < px0 + w) ok = render_block(&m, camx, camy, c1, ly, px0 + w - c1, n, emph + r, dst + (c1 - px0), w);
+                if (px0 < c0) ok = render_block(&m, camx, camy, px0, ly, c0 - px0, n, emph + r, dst, hdst, w);
+                if (ok && c1 < px0 + w)
+                    ok = render_block(&m, camx, camy, c1, ly, px0 + w - c1, n, emph + r, dst + (c1 - px0), hdst ? hdst + (c1 - px0) : NULL, w);
                 for (int i = 0; i < n && c0 < c1; i++)
                     memcpy(dst + (size_t)i * w + (c0 - px0), ppu.fb + (ly + i) * 256 + c0, (size_t)(c1 - c0));
+                if (c0 < c1) copy_sources(hdst, hsdst, w, ly, n, c0, c1, px0);
             }
             r += n;
         }
         if (ok) {
-            draw_objects(camx, camy, out, emph, px0, py0, w, h);
+            draw_objects(camx, camy, out, hspr, emph, px0, py0, w, h);
             return 1;
         }
+        if (hbg) { memset(hbg, 0, (size_t)w * h * sizeof *hbg); memset(hspr, 0, (size_t)w * h * sizeof *hspr); }
     }
     objects_drawn = 0;
     /* not understood: the picture as the PPU drew it, black around it */
@@ -404,7 +441,10 @@ int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h) {
         memset(dst, 0x0F, (size_t)w);
         emph[r] = 0;
         if (ly >= 0 && ly < 240) {
-            if (c0 < c1) memcpy(dst + (c0 - px0), ppu.fb + ly * 256 + c0, (size_t)(c1 - c0));
+            if (c0 < c1) {
+                memcpy(dst + (c0 - px0), ppu.fb + ly * 256 + c0, (size_t)(c1 - c0));
+                copy_sources(hbg ? hbg + (size_t)r * w : NULL, hspr ? hspr + (size_t)r * w : NULL, w, ly, 1, c0, c1, px0);
+            }
             emph[r] = ppu.line_emph[ly];
         }
     }
@@ -444,7 +484,7 @@ int widescreen_check(int *total_tiles, int *bad_pixels, int *total_pixels) {
     /* 2. the centre re-rendered with the band renderer against the PPU's pixels: only
           sprites and tiles the game changed directly in VRAM may differ */
     static uint8_t centre[256 * 240];
-    if (render_block(&m, camx, camy, 0, 0, 256, 240, ppu.line_emph, centre, 256)) {
+    if (render_block(&m, camx, camy, 0, 0, 256, 240, ppu.line_emph, centre, NULL, 256)) {
         int bp = 0;
         for (int y = 0; y < VISIBLE_H; y++)
             for (int x = 0; x < 256; x++)

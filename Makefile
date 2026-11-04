@@ -29,7 +29,7 @@ BUILD   ?= build
 GEN     := generated
 
 RUNTIME_SRC := runtime/cpu.c runtime/mem.c runtime/cart.c runtime/mapper.c runtime/ppu.c \
-               runtime/apu.c runtime/sys.c runtime/png.c runtime/palette.c runtime/widescreen.c
+               runtime/apu.c runtime/sys.c runtime/png.c runtime/palette.c runtime/widescreen.c runtime/remaster.c
 RUNTIME_OBJ := $(patsubst runtime/%.c,$(BUILD)/%.o,$(RUNTIME_SRC))
 
 GEN_SRC := $(wildcard $(GEN)/*.c)
@@ -88,7 +88,7 @@ endif
 
 all: headless
 
-$(BUILD)/%.o: runtime/%.c runtime/nes.h runtime/widescreen.h
+$(BUILD)/%.o: runtime/%.c runtime/nes.h runtime/widescreen.h runtime/remaster.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -131,7 +131,7 @@ $(BUILD)/rc/$(notdir $(basename $(1))).o: $(1)
 endef
 $(foreach src,$(RCHEEVOS_SRC),$(eval $(call RC_RULE,$(src))))
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h frontend/touchpad.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h runtime/remaster.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h frontend/touchpad.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(RCHEEVOS_CFLAGS) -Iruntime -c $< -o $@
 

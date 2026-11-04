@@ -26,6 +26,8 @@ if [ -n "$ROM" ]; then
         ./$b/startropics "$ROM" --rewind-test 1200 | grep rewind-test
         ./$b/startropics "$ROM" --ui-shot "/tmp/ui-$b.png" 1 60 | grep ui-shot
         grep -E "^(display_mode|aspect|scaling|resolution)=" $b/startropics.ini | tr '\n' ' '; echo
+        sed -i 's/^textures=.*/textures=1/' $b/startropics.ini   # the remastered graphics
+        ./$b/startropics "$ROM" --game-shot "/tmp/tex-$b.png" 900 | grep game-shot
     done
 fi
 

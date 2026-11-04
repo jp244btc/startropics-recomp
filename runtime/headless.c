@@ -7,6 +7,7 @@
 #include "png.h"
 #include "palette.h"
 #include "widescreen.h"
+#include "remaster.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,6 +105,16 @@ static int wide_to_rgb(uint8_t *rgb) {
     return decoded;
 }
 
+/* the frame with the remastered graphics as a PNG (rgb: a 256x240x3 scratch buffer) */
+static void write_remastered(const char *path, uint8_t *rgb) {
+    static uint32_t argb[256 * 240];
+    remaster_frame(argb, 256, ppu.fb, ppu.hd_bg, ppu.hd_spr, 256, ppu.line_emph, 256, 240);
+    for (int i = 0; i < 256 * 240; i++) {
+        rgb[i * 3] = (uint8_t)(argb[i] >> 16); rgb[i * 3 + 1] = (uint8_t)(argb[i] >> 8); rgb[i * 3 + 2] = (uint8_t)argb[i];
+    }
+    png_write_rgb(path, 256, 240, rgb);
+}
+
 static uint64_t fnv1a(uint64_t h, const void *data, size_t len) {
     const uint8_t *p = data;
     for (size_t i = 0; i < len; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
@@ -148,6 +159,10 @@ static void usage(void) {
         "  --png-every N       write FILE with the frame number appended every N frames\n"
         "  --widescreen FILE   write the last frame as a 704x336 PNG with the map decoded around the picture\n"
         "                      (also every N frames with --png-every); checks that the centre matches --png\n"
+        "  --remaster FILE     write the last frame with the remastered graphics (also every N frames)\n"
+        "  --remaster-pack F   the pack of hand-made tiles for --remaster\n"
+        "  --hd-dump FILE      write the last frame's pixel sources (tools/remaster): palette, line\n"
+        "                      masks, pixels and each layer's source tile per pixel\n"
         "  --wav FILE          write audio to a 48 kHz WAV\n"
         "  --trace FILE        write a per-instruction trace (interpreter)\n"
         "  --nestest N         nestest mode: start at $C000 and run N instructions\n"
@@ -162,7 +177,7 @@ static void usage(void) {
 
 int main(int argc, char **argv) {
     const char *rom = NULL, *png = NULL, *wav = NULL, *trace = NULL, *cov = NULL, *hash = NULL, *sav = NULL, *input = NULL, *debug_log = NULL, *ram_dump = NULL, *wide = NULL;
-    const char *state_save = NULL, *state_load = NULL;
+    const char *state_save = NULL, *state_load = NULL, *remaster = NULL, *remaster_pack = NULL, *hd_dump = NULL;
     int frames = 600, png_every = 0, ram_dump_every = 0, nestest = 0, blargg = 0, recomp = 0, quiet = 0, trace_start = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i + 1 < argc) rom = argv[++i];
@@ -172,6 +187,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--png") && i + 1 < argc) png = argv[++i];
         else if (!strcmp(argv[i], "--png-every") && i + 1 < argc) png_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--widescreen") && i + 1 < argc) wide = argv[++i];
+        else if (!strcmp(argv[i], "--remaster") && i + 1 < argc) remaster = argv[++i];
+        else if (!strcmp(argv[i], "--remaster-pack") && i + 1 < argc) remaster_pack = argv[++i];
+        else if (!strcmp(argv[i], "--hd-dump") && i + 1 < argc) hd_dump = argv[++i];
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav = argv[++i];
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace = argv[++i];
         else if (!strcmp(argv[i], "--nestest") && i + 1 < argc) nestest = atoi(argv[++i]);
@@ -208,6 +226,11 @@ int main(int argc, char **argv) {
     }
     nes_palette_build(pal);
     if (input) load_input_script(input);
+    if (hd_dump) ppu_hd_capture = true;
+    if (remaster) {
+        ppu_hd_capture = true;
+        if (remaster_init(remaster_pack) < 0) { fprintf(stderr, "remaster: this ROM has no CHR ROM\n"); return 1; }
+    }
 
     if (recomp) {
         if (!recomp_rom_sha1) { fprintf(stderr, "this build has no recompiled code\n"); return 1; }
@@ -275,6 +298,11 @@ int main(int argc, char **argv) {
             fb_to_rgb(rgb);
             png_write_rgb(name, 256, 240, rgb);
         }
+        if (remaster && png_every && (frame % png_every) == 0) {
+            char name[1100];
+            snprintf(name, sizeof name, "%s.%05d.png", remaster, frame);
+            write_remastered(name, rgb);
+        }
         if (wide && png_every && (frame % png_every) == 0) {
             char name[1100];
             snprintf(name, sizeof name, "%s.%05d.png", wide, frame);
@@ -304,6 +332,21 @@ int main(int argc, char **argv) {
     }
 
     if (png) { fb_to_rgb(rgb); png_write_rgb(png, 256, 240, rgb); }
+    if (remaster) write_remastered(remaster, rgb);
+    if (hd_dump) {   /* "STHD" 2, scroll t, fine x, ctrl, palette[32], line masks[240], fb, hd_bg, hd_spr (little-endian) */
+        FILE *f = fopen(hd_dump, "wb");
+        if (f) {
+            uint8_t scroll[4] = { (uint8_t)ppu.frame_t, (uint8_t)(ppu.frame_t >> 8), ppu.frame_x, ppu.frame_ctrl };
+            fwrite("STHD\2\0\0\0", 1, 8, f);
+            fwrite(scroll, 1, 4, f);
+            fwrite(ppu.palette, 1, 32, f);
+            fwrite(ppu.line_emph, 1, 240, f);
+            fwrite(ppu.fb, 1, sizeof ppu.fb, f);
+            fwrite(ppu.hd_bg, 4, 256 * 240, f);
+            fwrite(ppu.hd_spr, 4, 256 * 240, f);
+            fclose(f);
+        }
+    }
     if (wide) {
         /* the centre of the canvas must be the normal frame, pixel for pixel, on every line the PPU drew
            (lines it left blank show the map when the scene is decoded; objects are left out here, they

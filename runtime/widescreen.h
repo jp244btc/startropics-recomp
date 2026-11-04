@@ -26,6 +26,10 @@
    Returns 1 when the map was decoded, 0 when the scene is not understood. */
 int widescreen_render(uint8_t *out, uint8_t *emph, int x, int y, int w, int h);
 
+/* The same, with each pixel's source tile per layer in hbg / hspr (w x h, see HD_* in nes.h) for
+   the enhanced graphics; the PPU's part comes from ppu.hd_bg / hd_spr (ppu_hd_capture). */
+int widescreen_render_hd(uint8_t *out, uint8_t *emph, uint32_t *hbg, uint32_t *hspr, int x, int y, int w, int h);
+
 /* The field objects (villagers and the like) the game keeps beyond its screen, drawn into the
    canvas by widescreen_render (on by default; the harness turns them off to compare the centre
    with the PPU's frame), and how many of those the last render drew. */

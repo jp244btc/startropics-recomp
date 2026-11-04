@@ -109,7 +109,32 @@ typedef struct {
     uint8_t  frame_x, frame_ctrl;
     uint16_t frame_chr_bank[8];
     uint8_t  fb[256 * 240];     /* 6-bit palette index per pixel */
+    /* Enhanced graphics (remaster.c): with ppu_hd_capture set, the source of every pixel of each layer
+       (HD_* below). Not machine state: outside the save states, like fb. */
+    uint32_t hd_bg[256 * 240], hd_spr[256 * 240];
+    uint32_t hd_latch, hd_tile_a, hd_tile_b;   /* the fetched background tile, the two in the shifters */
+    uint8_t  hd_shifts;                        /* shifts since the last reload */
+    uint32_t hd_spr_tile[64];                  /* each sprite unit of the line: tile, row, flips */
+    uint8_t  hd_spr_col[64];                   /* its pixels shifted out so far */
 } ppu_t;
+
+/* A pixel's source, for the enhanced graphics: the 16-byte tile of the cartridge's CHR ROM
+   (HD_TILE_NONE where the tile is not in ROM), its row and column in the tile (as stored,
+   before flipping), the palette and the 2-bit pixel value, and for sprites the flips and the
+   priority. 0 = no pixel from this layer. */
+#define HD_TILE(i)     ((i) & 0x3FFF)
+#define HD_ROW(i)      (((i) >> 14) & 7)
+#define HD_COL(i)      (((i) >> 17) & 7)
+#define HD_PAL(i)      (((i) >> 20) & 3)
+#define HD_VALUE(i)    (((i) >> 22) & 3)
+#define HD_HFLIP       (1u << 24)
+#define HD_VFLIP       (1u << 25)
+#define HD_BEHIND      (1u << 26)
+#define HD_PRESENT     (1u << 27)
+#define HD_TILE_NONE   0x3FFF
+#define HD_PACK(tile, row, col, pal, value) \
+    (HD_PRESENT | ((uint32_t)(tile) & 0x3FFF) | ((uint32_t)(row) << 14) | ((uint32_t)(col) << 17) | \
+     ((uint32_t)(pal) << 20) | ((uint32_t)(value) << 22))
 
 /* ------------------------------------------------------------------ */
 /* APU                                                                 */
@@ -283,6 +308,8 @@ void    ppu_reg_write(int reg, uint8_t v);
 void    ppu_oam_dma(uint8_t page);
 void    ppu_update_nmi(void);
 extern bool ppu_no_sprite_limit;   /* option, not machine state: draw every sprite on a line instead of the hardware's 8 (no flicker) */
+extern bool ppu_hd_capture;        /* option: record ppu.hd_bg / hd_spr for the enhanced graphics */
+uint32_t ppu_hd_tile_of(uint16_t addr);   /* the CHR ROM tile and row (bits 14-16) behind a pattern address now */
 
 /* apu.c */
 void    apu_reset(void);

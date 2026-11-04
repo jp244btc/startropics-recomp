@@ -11,6 +11,15 @@
 
 ppu_t ppu;
 bool ppu_no_sprite_limit;
+bool ppu_hd_capture;
+
+/* the tile of the CHR ROM image behind a pattern address with the current banks, and the row */
+uint32_t ppu_hd_tile_of(uint16_t addr) {
+    const uint8_t *p = mapper.chr_ptr[(addr >> 10) & 7] + (addr & 0x3FF);
+    if (!cart.chr || p < cart.chr || p >= cart.chr + cart.chr_size) return HD_TILE_NONE;
+    uint32_t off = (uint32_t)(p - cart.chr);
+    return (off >> 4) | ((off & 7) << 14);
+}
 
 static inline bool rendering_enabled(void) { return (ppu.mask & 0x18) != 0; }
 
@@ -72,6 +81,7 @@ static inline void copy_x(void) { ppu.v = (uint16_t)((ppu.v & ~0x041F) | (ppu.t 
 static inline void copy_y(void) { ppu.v = (uint16_t)((ppu.v & ~0x7BE0) | (ppu.t & 0x7BE0)); }
 
 static inline void reload_shifters(void) {
+    ppu.hd_tile_a = ppu.hd_tile_b; ppu.hd_tile_b = ppu.hd_latch; ppu.hd_shifts = 0;
     ppu.bg_shift_lo = (uint16_t)((ppu.bg_shift_lo & 0xFF00) | ppu.pt_lo_latch);
     ppu.bg_shift_hi = (uint16_t)((ppu.bg_shift_hi & 0xFF00) | ppu.pt_hi_latch);
     ppu.at_shift_lo = (uint16_t)((ppu.at_shift_lo & 0xFF00) | ((ppu.at_latch & 1) ? 0xFF : 0x00));
@@ -79,6 +89,7 @@ static inline void reload_shifters(void) {
 }
 
 static inline void shift_bg(void) {
+    ppu.hd_shifts++;
     ppu.bg_shift_lo <<= 1; ppu.bg_shift_hi <<= 1;
     ppu.at_shift_lo <<= 1; ppu.at_shift_hi <<= 1;
 }
@@ -98,6 +109,7 @@ static inline void bg_fetch_step(int dot) {
     case 6: {
         uint16_t a = (uint16_t)(((ppu.ctrl & 0x10) ? 0x1000 : 0) + ppu.nt_latch * 16 + ((ppu.v >> 12) & 7));
         ppu.pt_lo_latch = fetch(a);
+        if (ppu_hd_capture) ppu.hd_latch = ppu_hd_tile_of(a);
         break; }
     case 0: {
         uint16_t a = (uint16_t)(((ppu.ctrl & 0x10) ? 0x1000 : 0) + ppu.nt_latch * 16 + ((ppu.v >> 12) & 7) + 8);
@@ -161,10 +173,12 @@ static inline void sprite_fetch_step(int dot, int line) {
     case 1: fetch((uint16_t)(0x2000 | (ppu.v & 0x0FFF))); break;      /* garbage NT */
     case 3: fetch((uint16_t)(0x23C0 | (ppu.v & 0x0C00) | ((ppu.v >> 4) & 0x38) | ((ppu.v >> 2) & 0x07))); break;
     case 5: {
-        uint8_t v = fetch(sprite_pattern_addr(i, line, 0));
+        uint16_t a = sprite_pattern_addr(i, line, 0);
+        uint8_t v = fetch(a);
         uint8_t attr = ppu.soam[i * 4 + 2];
         if (attr & 0x40) v = reverse8(v);
         ppu.spr_pat_lo[i] = (i < ppu.spr_count_next) ? v : 0;
+        if (ppu_hd_capture) ppu.hd_spr_tile[i] = ppu_hd_tile_of(a) | ((attr & 0x40) ? HD_HFLIP : 0) | ((attr & 0x80) ? HD_VFLIP : 0);
         break; }
     case 7: {
         uint8_t v = fetch(sprite_pattern_addr(i, line, 1));
@@ -173,6 +187,7 @@ static inline void sprite_fetch_step(int dot, int line) {
         ppu.spr_pat_hi[i] = (i < ppu.spr_count_next) ? v : 0;
         ppu.spr_attr[i] = attr;
         ppu.spr_x[i] = ppu.soam[i * 4 + 3];
+        ppu.hd_spr_col[i] = 0;
         break; }
     default: break;
     }
@@ -187,8 +202,11 @@ static void load_extra_sprites(int line) {
         uint8_t hi = ppu_mem_read(sprite_pattern_addr(i, line, 1));
         if (attr & 0x40) { lo = reverse8(lo); hi = reverse8(hi); }
         ppu.spr_pat_lo[i] = lo; ppu.spr_pat_hi[i] = hi;
+        if (ppu_hd_capture)
+            ppu.hd_spr_tile[i] = ppu_hd_tile_of(sprite_pattern_addr(i, line, 0)) | ((attr & 0x40) ? HD_HFLIP : 0) | ((attr & 0x80) ? HD_VFLIP : 0);
         ppu.spr_attr[i] = attr;
         ppu.spr_x[i] = ppu.soam[i * 4 + 3];
+        ppu.hd_spr_col[i] = 0;
     }
 }
 
@@ -202,18 +220,39 @@ static inline void render_pixel(int sl, int dot) {
     }
     uint8_t spr_pixel = 0, spr_pal = 0;
     bool spr_behind = false, is_spr0 = false;
+    int spr_unit = -1, spr_col = 0;
     for (int i = 0; i < ppu.spr_count; i++) {
-        if (ppu.spr_x[i] > 0) { ppu.spr_x[i]--; continue; }
+        if (ppu.spr_x[i] > 0) { ppu.spr_x[i]--; ppu.hd_spr_col[i] = 0; continue; }
         uint8_t p = (uint8_t)((ppu.spr_pat_lo[i] >> 7) | ((ppu.spr_pat_hi[i] >> 7) << 1));
         ppu.spr_pat_lo[i] <<= 1; ppu.spr_pat_hi[i] <<= 1;
+        int col = ppu.hd_spr_col[i]++;
         if (p && !spr_pixel) {
             spr_pixel = p;
             spr_pal = ppu.spr_attr[i] & 3;
             spr_behind = (ppu.spr_attr[i] & 0x20) != 0;
             is_spr0 = (i == 0 && ppu.spr0_line);
+            spr_unit = i; spr_col = col;
         }
     }
     if (!(ppu.mask & 0x10) || (x < 8 && !(ppu.mask & 0x04))) spr_pixel = 0;
+    if (ppu_hd_capture) {
+        /* the source of each layer's pixel: the background tile in the shifters at the fine-x
+           position, and the winning sprite (its columns count in screen order, so a mirrored
+           sprite's column in the tile runs backwards) */
+        uint32_t bgi = 0, spi = 0;
+        if (bg_pixel || ((ppu.mask & 0x08) && (x >= 8 || (ppu.mask & 0x02)))) {
+            int c = ppu.x + ppu.hd_shifts;
+            uint32_t t = c <= 7 ? ppu.hd_tile_a : ppu.hd_tile_b;
+            bgi = HD_PACK(HD_TILE(t), HD_ROW(t), c & 7, bg_pal, bg_pixel);
+        }
+        if (spr_pixel) {
+            uint32_t t = ppu.hd_spr_tile[spr_unit];
+            int c = (t & HD_HFLIP) ? 7 - (spr_col & 7) : (spr_col & 7);
+            spi = HD_PACK(HD_TILE(t), HD_ROW(t), c, spr_pal, spr_pixel) | (t & (HD_HFLIP | HD_VFLIP)) | (spr_behind ? HD_BEHIND : 0);
+        }
+        ppu.hd_bg[sl * 256 + x] = bgi;
+        ppu.hd_spr[sl * 256 + x] = spi;
+    }
 
     if (is_spr0 && spr_pixel && bg_pixel && x != 255 && (ppu.mask & 0x18) == 0x18)
         ppu.status |= 0x40;
@@ -281,6 +320,7 @@ static inline void ppu_tick(void) {
             uint8_t color = ((ppu.v & 0x3F00) == 0x3F00) ? ppu.palette[pal_index(ppu.v)] : ppu.palette[0];
             if (ppu.mask & 1) color &= 0x30;
             ppu.fb[sl * 256 + (dot - 1)] = color;
+            if (ppu_hd_capture) ppu.hd_bg[sl * 256 + (dot - 1)] = ppu.hd_spr[sl * 256 + (dot - 1)] = 0;
         }
     } else if (sl == 241 && dot == 1) {
         if (!ppu.suppress_vbl) { ppu.status |= 0x80; ppu_update_nmi(); }

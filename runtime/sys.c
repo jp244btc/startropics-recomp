@@ -61,7 +61,7 @@ typedef struct {
     uint32_t version;
     cpu_t    cpu;
     uint8_t  ram[2048];
-    uint8_t  ppu[offsetof(ppu_t, fb)];   /* ppu_t up to the frame buffer, which is its last member */
+    uint8_t  ppu[offsetof(ppu_t, fb)];   /* ppu_t up to the frame buffer; it and the HD capture come last */
     apu_t    apu;
     mapper_t mapper;
     uint8_t  wram[8192];

@@ -38,6 +38,7 @@
 #include "input.h"
 #include "gpu_sync.h"
 #include "widescreen.h"
+#include "remaster.h"
 #include "rewind.h"
 #include "achievements.h"
 #include "touchpad.h"
@@ -75,6 +76,7 @@ typedef struct {
     int res_w, res_h;    /* chosen size, 0 = auto: the window size, the exclusive display mode, or the render size in fullscreen */
     int scaling;         /* 0 integer, 1 fit, 2 stretch */
     int aspect;          /* 0 square pixels, 1 4:3 CRT, 2 16:9 widescreen (map decoded beside the picture, black bars elsewhere), 3 16:10 */
+    int textures;        /* 0 original, 1 remastered (runtime/remaster.c: recolored and shaded in the Pixel Remaster's manner) */
     int filter;          /* 0 nearest, 1 linear, 2 sharp */
     int shader;          /* 0 off, 1 scanlines, 2 CRT, 3 CRT curved, 4 glow */
     int shader_strength; /* 0 light, 1 medium, 2 strong */
@@ -104,6 +106,7 @@ static const char *const latency_names[]  = { "Low", "Normal", "Safe" };
 static const char *const window_sizes[]  = { "1x", "2x", "3x", "4x", "5x", "6x" };
 static const char *const scalings[]      = { "Integer (exact pixels)", "Fit (fills the screen)", "Stretch (distorts)" };
 static const char *const aspects[]       = { "Square pixels 8:7", "4:3 (CRT)", "16:9 (widescreen)", "16:10 (widescreen)" };
+static const char *const texture_names[] = { "Original", "Remastered" };
 static const char *const filters[]       = { "Nearest", "Linear", "Sharp" };
 static const char *const onoff[]         = { "Off", "On" };
 static const char *const shader_names[]  = { "Off", "Scanlines", "CRT", "CRT curved", "Glow" };
@@ -141,6 +144,7 @@ static uint32_t palette[512];
 static uint32_t frame_rgb[WS_W * WS_H];   /* the picture to show, frame_w x frame_h (see frame_to_rgb) */
 static uint8_t wide_fb[WS_W * WS_H];      /* widescreen: that part of the canvas around the PPU's picture */
 static uint8_t wide_emph[WS_H];           /* and the $2001 bits of each of its rows */
+static uint32_t wide_hbg[WS_W * WS_H], wide_hspr[WS_W * WS_H];   /* and each pixel's source tile, for the remastered textures */
 static int frame_w = FB_W, frame_h = FB_H;
 static uint8_t wram_snapshot[8192];
 static SDL_Window *window;
@@ -181,10 +185,10 @@ static double refresh_hz;             /* reported display refresh rate, 0 if unk
 enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT, ACT_RA_LOGIN,
        GFX_CHANGED, AUD_CHANGED, LAT_CHANGED, KEY_CHANGED, SLOT_CHANGED, RA_CHANGED, RA_TEXT };
 enum { TAB_PLAY, TAB_GFX, TAB_AUDIO, TAB_CONTROLS, TAB_RA, TAB_ROM, N_TABS };
-static ui_item play_items[8], gfx_all[13], gfx_items[13], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
-#define GFX_ROWS 13
+#define GFX_ROWS 14
 #define GFX_WINDOW_SIZE_ROW 2
-#define GFX_INFO_ROW 12
+#define GFX_INFO_ROW 13
+static ui_item play_items[8], gfx_all[GFX_ROWS], gfx_items[GFX_ROWS], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
 static ui_tab tabs[N_TABS];
 static ui_menu menu;
 
@@ -381,6 +385,7 @@ static void write_config(void) {
     fprintf(f, "shader_strength=%d     ; 0 light, 1 medium, 2 strong\n", cfg.shader_strength);
     fprintf(f, "overscan=%d            ; crop 8 lines at the top and bottom\n", cfg.overscan);
     fprintf(f, "no_sprite_limit=%d     ; 1: draw every sprite on a line instead of 8 (no flicker)\n", cfg.no_sprite_limit);
+    fprintf(f, "textures=%d            ; 0 original, 1 remastered (recolored and shaded; remaster.pak next to the game adds hand-made tiles)\n", cfg.textures);
     fprintf(f, "low_latency=%d         ; 1: frame delay, locked to the display (Windows, Android) or timer pacing without vsync (Linux); 0: plain timer (Linux: vsync)\n", cfg.lowlat);
     fprintf(f, "runahead=%d            ; frames of run-ahead (0-3); StarTropics reacts 2 frames after a press\n", cfg.runahead);
     fprintf(f, "audio_latency=%d       ; 0 low (~25 ms), 1 normal (~45 ms), 2 safe (~90 ms)\n", cfg.audio_latency);
@@ -440,6 +445,7 @@ static void load_config(void) {
         else if (!strcmp(key, "shader_strength")) { int v = atoi(val); if (v >= 0 && v <= 2) cfg.shader_strength = v; }
         else if (!strcmp(key, "overscan")) cfg.overscan = atoi(val) ? 1 : 0;
         else if (!strcmp(key, "no_sprite_limit")) cfg.no_sprite_limit = atoi(val) ? 1 : 0;
+        else if (!strcmp(key, "textures")) cfg.textures = atoi(val) ? 1 : 0;
         else if (!strcmp(key, "rewind_enabled")) cfg.rewind = atoi(val) ? 1 : 0;
         else if (!strcmp(key, "state_slot")) { int v = atoi(val); if (v >= 1 && v <= 9) cfg.state_slot = v; }
         else if (!strcmp(key, "ra_hardcore")) cfg.ra_hardcore = atoi(val) ? 1 : 0;
@@ -574,19 +580,29 @@ static void ensure_textures(int k) {
    canvas with the map decoded around it) as ARGB in frame_rgb, frame_w x frame_h */
 static void frame_to_rgb(const SDL_Rect *src) {
     const uint8_t *fb = ppu.fb + src->y * FB_W + src->x, *emph = ppu.line_emph + src->y;
-    int stride = FB_W;
+    const uint32_t *hbg = ppu.hd_bg + src->y * FB_W + src->x, *hspr = ppu.hd_spr + src->y * FB_W + src->x;
+    int stride = FB_W, remastered = cfg.textures && ppu_hd_capture && remaster_ready();
     frame_w = src->w; frame_h = src->h;
     if (widescreen_on()) {
-        int decoded = widescreen_render(wide_fb, wide_emph, src->x, src->y, src->w, src->h);
+        int decoded = remastered ? widescreen_render_hd(wide_fb, wide_emph, wide_hbg, wide_hspr, src->x, src->y, src->w, src->h)
+                                 : widescreen_render(wide_fb, wide_emph, src->x, src->y, src->w, src->h);
         if (!decoded && cfg.overscan && integer_fill())
             for (int y = 0; y < frame_h; y++) {   /* the lines the crop hides stay black around the picture */
                 int line = src->y + y - WS_VBAND;
                 if ((line >= 0 && line < OVERSCAN) || (line >= FB_H - OVERSCAN && line < FB_H)) {
                     memset(wide_fb + (size_t)y * frame_w, 0x0F, (size_t)frame_w);
                     wide_emph[y] = 0;
+                    if (remastered) {
+                        memset(wide_hbg + (size_t)y * frame_w, 0, (size_t)frame_w * sizeof *wide_hbg);
+                        memset(wide_hspr + (size_t)y * frame_w, 0, (size_t)frame_w * sizeof *wide_hspr);
+                    }
                 }
             }
-        fb = wide_fb; emph = wide_emph; stride = frame_w;
+        fb = wide_fb; emph = wide_emph; hbg = wide_hbg; hspr = wide_hspr; stride = frame_w;
+    }
+    if (remastered) {
+        remaster_frame(frame_rgb, frame_w, fb, hbg, hspr, stride, emph, frame_w, frame_h);
+        return;
     }
     for (int y = 0; y < frame_h; y++) {
         const uint32_t *pal = palette + ((emph[y] >> 5) & 7) * 64;
@@ -943,11 +959,14 @@ static void window_size_for_config(int *w, int *h) {
     *w = (int)(*h * target_aspect(src.h) + 0.5);
 }
 
+static void setup_textures(void);
+
 static void apply_graphics(void) {
     cfg.window_size = window_size_idx + 1;
     if (cfg.resolution > 0 && cfg.resolution < n_res) { cfg.res_w = res_list[cfg.resolution].w; cfg.res_h = res_list[cfg.resolution].h; }
     else { cfg.resolution = 0; cfg.res_w = cfg.res_h = 0; }
     ppu_no_sprite_limit = cfg.no_sprite_limit != 0;
+    setup_textures();
     Uint32 flags = SDL_GetWindowFlags(window);
     int cur = ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) ? 1 : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
     if (cfg.display_mode == 2) {
@@ -1306,6 +1325,25 @@ static void set_rom_name(const char *path) {
 
 static void refresh_rom_items(void);
 
+/* the remastered textures for the loaded ROM: the automatic inks, and remaster.pak (hand-made
+   tiles) from the game's folder, the data folder or, on Android, the app's shared folder */
+static void setup_textures(void) {
+    ppu_hd_capture = cfg.textures != 0;
+    if (!cfg.textures || !rom_ok || remaster_ready()) return;
+    char path[1300] = "";
+    const char *dirs[3] = { base_dir, data_dir, NULL };
+#ifdef __ANDROID__
+    dirs[2] = SDL_AndroidGetExternalStoragePath();
+#endif
+    for (int i = 0; i < 3 && !path[0]; i++) {
+        if (!dirs[i]) continue;
+        size_t n = strlen(dirs[i]);
+        snprintf(path, sizeof path, "%s%sremaster.pak", dirs[i], n && (dirs[i][n - 1] == '/' || dirs[i][n - 1] == '\\') ? "" : "/");
+        if (!file_exists(path)) path[0] = 0;
+    }
+    remaster_init(path[0] ? path : NULL);
+}
+
 /* loads and verifies a cartridge dump; returns 1 when it is a StarTropics ROM */
 static int load_rom_file(const char *path) {
     rom_ok = 0; game_started = 0;
@@ -1349,6 +1387,8 @@ static int load_rom_file(const char *path) {
     }
     rewind_clear(); chord_clear();
     ach_reset();
+    remaster_forget();   /* the new ROM's tiles: read again when the textures are on */
+    setup_textures();
     printf("ROM: %s (%s) %s | mode: %s | data folder: %s\n", rom_name, known ? known : "unknown", rom_hashes,
            sys.use_recomp ? "native (recompiled)" : "interpreter", data_dir);
     fflush(stdout);
@@ -1543,14 +1583,15 @@ static void build_menu(void) {
     g[2] = (ui_item){ "Window size", UI_CHOICE, GFX_CHANGED, &window_size_idx, window_sizes, 6, 0, 0, 0, NULL, "", NULL };
     g[3] = (ui_item){ "Scaling", UI_CHOICE, GFX_CHANGED, &cfg.scaling, scalings, 3, 0, 0, 0, NULL, "", NULL };
     g[4] = (ui_item){ "Aspect ratio", UI_CHOICE, GFX_CHANGED, &cfg.aspect, aspects, 4, 0, 0, 0, NULL, "", NULL };
-    g[5] = (ui_item){ "Filter", UI_CHOICE, GFX_CHANGED, &cfg.filter, filters, 3, 0, 0, 0, NULL, "", NULL };
-    g[6] = (ui_item){ "Shader", UI_CHOICE, GFX_CHANGED, &cfg.shader, shader_names, 5, 0, 0, 0, NULL, "", NULL };
-    g[7] = (ui_item){ "Shader strength", UI_CHOICE, GFX_CHANGED, &cfg.shader_strength, strength_names, 3, 0, 0, 0, NULL, "", NULL };
-    g[8] = (ui_item){ "Overscan crop", UI_CHOICE, GFX_CHANGED, &cfg.overscan, onoff, 2, 0, 0, 0, NULL, "", NULL };
-    g[9] = (ui_item){ "Sprite limit", UI_CHOICE, GFX_CHANGED, &cfg.no_sprite_limit, sprite_limits, 2, 0, 0, 0, NULL, "", NULL };
-    g[10] = (ui_item){ "Low-latency sync", UI_CHOICE, GFX_CHANGED, &cfg.lowlat, onoff, 2, 0, 0, 0, NULL, "", NULL };
-    g[11] = (ui_item){ "Run-ahead", UI_CHOICE, GFX_CHANGED, &cfg.runahead, runahead_names, 4, 0, 0, 0, NULL, "", NULL };
-    g[12] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    g[5] = (ui_item){ "Textures", UI_CHOICE, GFX_CHANGED, &cfg.textures, texture_names, 2, 0, 0, 0, NULL, "", NULL };
+    g[6] = (ui_item){ "Filter", UI_CHOICE, GFX_CHANGED, &cfg.filter, filters, 3, 0, 0, 0, NULL, "", NULL };
+    g[7] = (ui_item){ "Shader", UI_CHOICE, GFX_CHANGED, &cfg.shader, shader_names, 5, 0, 0, 0, NULL, "", NULL };
+    g[8] = (ui_item){ "Shader strength", UI_CHOICE, GFX_CHANGED, &cfg.shader_strength, strength_names, 3, 0, 0, 0, NULL, "", NULL };
+    g[9] = (ui_item){ "Overscan crop", UI_CHOICE, GFX_CHANGED, &cfg.overscan, onoff, 2, 0, 0, 0, NULL, "", NULL };
+    g[10] = (ui_item){ "Sprite limit", UI_CHOICE, GFX_CHANGED, &cfg.no_sprite_limit, sprite_limits, 2, 0, 0, 0, NULL, "", NULL };
+    g[11] = (ui_item){ "Low-latency sync", UI_CHOICE, GFX_CHANGED, &cfg.lowlat, onoff, 2, 0, 0, 0, NULL, "", NULL };
+    g[12] = (ui_item){ "Run-ahead", UI_CHOICE, GFX_CHANGED, &cfg.runahead, runahead_names, 4, 0, 0, 0, NULL, "", NULL };
+    g[13] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
     ui_item *a = aud_items;
     a[0] = (ui_item){ "Volume", UI_INT, AUD_CHANGED, &cfg.volume, NULL, 0, 0, 100, 5, "%", "", NULL };

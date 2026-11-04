@@ -33,6 +33,9 @@ Graphics      Display mode (windowed / fullscreen / fullscreen exclusive),
               overscan crop,
               sprite limit (8 per line as on the console, or unlimited: no flicker
               when many sprites share a line),
+              textures (Original, or Remastered: the game redrawn with many more
+              colors per tile and soft shading, in the manner of the Pixel
+              Remaster editions of the early Final Fantasy games; below),
               low-latency sync (phase-locks to the display), run-ahead (0-3 frames;
               2 cancels the game's own input lag).
               The line under the rows says what the settings produce (for example
@@ -86,6 +89,17 @@ of a CRT), CRT (scanlines, an aperture-grille mask and a soft glow), CRT curved
 Strength scales all of them. They are drawn by the graphics card on top of the
 normal scaling and cost nothing noticeable; input lag does not change.
 
+Remastered textures
+-------------------
+Textures: Remastered colors and shades every tile of the game as it is drawn: more
+colors per tile, light from the upper left, shadows that lean toward blue and lights
+toward yellow, and natural tones for the sea, the grass and the sand. It is worked out
+from your ROM's own tiles while you play, and the widescreen view's map gets it too.
+A hand-made tile pack (remaster.pak) can replace that tile by tile: put it in the
+program's folder (Android: Android/data/<package>/files) and it is used whenever
+Textures is set to Remastered. Packs are drawn over the cartridge's tiles, so none
+comes with the program; tools/remaster in the source shows how to make one.
+
 RetroAchievements
 -----------------
 With a free account at retroachievements.org the game's achievements unlock
@@ -108,6 +122,7 @@ saves/<rom name>.state1-9  save state slots (F5 / F8, F6 / F7 to pick one)
 screenshots/               F12 screenshots
 startropics.ini            settings and the remembered ROM path
 retroachievements.txt      RetroAchievements session (user name + token), if logged in
+remaster.pak               your own hand-made tiles for Textures: Remastered (optional)
 
 These live next to startropics.exe when that folder is writable. If it is not
 (Program Files, a read-only location, or the program was started from inside

@@ -57,6 +57,9 @@ Notes
   app backup includes them. Uninstalling the app deletes them.
 - RetroAchievements: log in on the Achievements tab (an on-screen or physical keyboard
   appears for the user name and password). Only the session token is stored.
+- Graphics > Textures: Remastered recolors and shades the game in the manner of the Pixel
+  Remaster games. A hand-made tile pack, remaster.pak, if you have one, goes in
+  Android/data/org.startropics.nativeport/files/ (…nativeport.touch for the phone app).
 - A log of the last run is written to Android/data/org.startropics.nativeport/files/
   startropics-log.txt (.touch for the phone app; handy with `adb pull` when something goes
   wrong).

@@ -46,6 +46,9 @@ Tips
   without vsync, as Mesen does by default, so no frame waits in a queue; with run-ahead
   the game reacts two frames sooner than in Mesen at its defaults. Switch it off for
   vsync: the smoothest scrolling, at up to one frame more latency.
+- Graphics > Textures: Remastered recolors and shades the game in the manner of the
+  Pixel Remaster games (more colors per tile, soft light from the upper left). A
+  hand-made tile pack, remaster.pak, if you have one, goes in the game folder.
 - Saves (the game's own and the 9 save state slots), settings and screenshots are kept
   in the game folder.
 - RetroAchievements: log in on the menu's Achievements tab. The password is only sent

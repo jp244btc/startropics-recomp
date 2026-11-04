@@ -258,17 +258,22 @@ relative to the palette, so the game's palette swaps, fades and color cycling ke
 working. Out of the box the inks are worked out from each tile's own pattern (a
 region is lit where its edge faces up or left and shaded where it faces down or
 right; lettering, told apart by its thin strokes in one color, stays flat and crisp),
-and the colors StarTropics leans on most get natural tones: an ocean blue,
-grass and forest greens, warm browns, and sand where the NES has pink beaches. The
-widescreen view's decoded map is remastered the same way. The steps are computed in
+and the colors StarTropics leans on most get natural tones: a deep sea whose blues,
+as in the Pixel Remaster's water, keep their saturation in shadow and turn turquoise
+in the light, turquoise shallows, grass and forest greens, warm browns, warm grey
+stone, and sand where the NES has pink beaches. The widescreen view's decoded map is
+remastered the same way. The steps are computed in
 OKLCH, so each one is an even change of lightness and pale colors deepen instead of
 turning garish; the cost is well under a millisecond a frame.
 
 A pack of hand-made tiles, `remaster.pak`, replaces the automatic inks tile by tile.
 Packs are made with `tools/remaster/remaster_art.py` from frames that
 `nes-headless --hd-dump` writes (each pixel's source tile): art painted over a frame
-is mapped back to the tiles that drew it. Because a pack is drawn over the
-cartridge's own tiles it belongs with your copy of the game; none is included here.
+is mapped back to the tiles that drew it. An ink may also name another of the tile's
+colors: the PPU keeps every palette a frame was drawn with (StarTropics changes them
+under the dungeons' status bar), so such inks take the colors of their own line.
+Because a pack is drawn over the cartridge's own tiles it belongs with your copy of
+the game; none is included here.
 The program loads `remaster.pak` from its own folder or its data folder (on Android,
 the app's files folder on the shared storage).
 

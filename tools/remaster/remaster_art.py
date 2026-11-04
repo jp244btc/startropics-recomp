@@ -26,6 +26,8 @@ Tile art (for textures that repeat, like grass or water): no dump or rect, but
 usage:
     remaster_art.py template DUMP LAYER X Y W H [OUT.art]   an art file with the frame's own colors
     remaster_art.py pack OUT.pak ART...                     the pack from art files
+Packs are format 2, which builds up to 1.2.1 skip (an ink naming another of the tile's colors takes
+it from the palette of the pixel's own line only from 1.2.2 on).
 The art is drawn over the cartridge's own tiles, so keep it (and the pack) with your own copy of
 the game, not in a public place.
 """
@@ -39,11 +41,11 @@ PRESENT = 1 << 27
 def read_dump(path):
     with open(path, "rb") as f:
         d = f.read()
-    if d[:4] != b"STHD" or d[4] not in (1, 2):
+    if d[:4] != b"STHD" or d[4] not in (1, 2, 3):
         raise SystemExit("%s: not a pixel-source dump" % path)
     o = 8
     scroll = None
-    if d[4] == 2:   # the frame's scroll: the screen's top left corner in the nametables
+    if d[4] >= 2:   # the frame's scroll: the screen's top left corner in the nametables
         t, fx = d[o] | (d[o + 1] << 8), d[o + 2]
         scroll = (((t >> 10) & 1) * 256 + (t & 0x1F) * 8 + fx, ((t >> 11) & 1) * 240 + ((t >> 5) & 0x1F) * 8 + (t >> 12))
         o += 4
@@ -51,8 +53,12 @@ def read_dump(path):
     emph = d[o:o + 240]; o += 240
     fb = d[o:o + 256 * 240]; o += 256 * 240
     bg = struct.unpack_from("<%dI" % (256 * 240), d, o); o += 4 * 256 * 240
-    spr = struct.unpack_from("<%dI" % (256 * 240), d, o)
-    return {"pal": pal, "emph": emph, "fb": fb, "bg": bg, "spr": spr, "scroll": scroll}
+    spr = struct.unpack_from("<%dI" % (256 * 240), d, o); o += 4 * 256 * 240
+    palsets = [pal]   # version 3: the palettes the frame's lines were drawn with (bits 28-29 of a source pick one)
+    if d[4] == 3:
+        n = d[o]
+        palsets = [d[o + 4 + 32 * k:o + 4 + 32 * (k + 1)] for k in range(max(1, n))]
+    return {"pal": pal, "emph": emph, "fb": fb, "bg": bg, "spr": spr, "scroll": scroll, "palsets": palsets}
 
 
 def source(info):
@@ -188,7 +194,7 @@ def pack(out, arts):
                     conflicts += 1
                 inks[row * 8 + col] = ink
     with open(out, "wb") as f:
-        f.write(b"STRM" + struct.pack("<II", 1, len(tiles)))
+        f.write(b"STRM" + struct.pack("<II", 2, len(tiles)))   # 2: builds from 1.2.2 on (inks of another color follow the line's palette)
         for (tile, layer), inks in sorted(tiles.items()):
             f.write(struct.pack("<HB", tile, 0 if layer == "bg" else 1) + bytes(inks))
     print("%s: %d tiles from %d art files%s" % (out, len(tiles), len(arts),

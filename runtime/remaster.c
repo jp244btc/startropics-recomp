@@ -5,7 +5,8 @@
  * Pixel Remaster games (an ocean blue instead of the NES's violet, grass and forest greens,
  * warm browns, peach sand and skin, a cool near-black for outlines); the rest of the NES
  * palette is only calmed where it is at its most saturated. Backgrounds have a few colors of
- * their own: the pink the NES gave every beach is sand there, while sprites keep it pink.
+ * their own: the pink the NES gave every beach is sand there, while sprites keep it pink; the
+ * light blue of the shallows is turquoise and the greys of the rock a warm stone grey.
  * Emphasis scales them as it scales the NES colors.
  *
  * Ramps: each color, under each emphasis setting, has seven steps (and the half steps between
@@ -13,7 +14,9 @@
  * an even change of lightness: three darker ones that turn toward blue (warm colors a little
  * toward red) with their saturation easing toward one common level, so pale colors deepen and
  * vivid ones calm instead of turning garish; the color itself; and three lighter ones that
- * turn toward yellow and lose chroma. Greys shade toward a cool grey.
+ * turn toward yellow and lose chroma. Greys shade toward a cool grey. The blues of the
+ * backgrounds, the sea's, are the exception, after the Pixel Remaster's water: they keep their
+ * saturation in shadow (a deep royal blue) and their lights turn turquoise.
  *
  * Automatic inks, from the tile's own 8x8 pattern: a pixel inside a region of one color is lit
  * one step where the region's edge faces up or left and shaded one step where it faces down or
@@ -22,10 +25,14 @@
  * forming at most three shapes: letters, digits, box borders) keeps its colors throughout, so text
  * stays crisp instead of embossed. Neighbors beyond the tile count as the same color, so a region
  * spanning tiles shows no seam. An ink that names the pixel's own color takes the color the PPU
- * actually drew, so mid-frame palette changes stay right.
+ * actually drew; one that names another of the tile's colors takes it from the palette the PPU
+ * drew that line with (ppu.hd_palettes), so mid-frame palette changes stay right.
  *
- * Pack: "STRM", version 1, a tile count, then per tile: its number in the CHR ROM (16-bit), the
- * layer it applies to (0 background, 1 sprites, 2 both) and its 64 inks (remaster.h), row by row.
+ * Pack: "STRM", version 2 (or 1), a tile count, then per tile: its number in the CHR ROM (16-bit),
+ * the layer it applies to (0 background, 1 sprites, 2 both) and its 64 inks (remaster.h), row by
+ * row. Version 2 is the same layout for builds that take another color's ink from the pixel's own
+ * line; builds that read only version 1 skip such a pack rather than color it with the palette
+ * of the frame's last line.
  */
 #include "remaster.h"
 #include "nes.h"
@@ -145,7 +152,8 @@ static const uint32_t remaster_colors[64] = {
 
 /* colors only the background layer takes */
 static const uint32_t remaster_bg_colors[64] = {
-    [0x35] = 0xDAB163, [0x17] = 0x8A5C30,
+    [0x35] = 0xDAB163, [0x17] = 0x8A5C30, [0x21] = 0x4FACDD,
+    [0x00] = 0x605A54, [0x10] = 0xA29A90,   /* stone: a warm grey */
 };
 
 static void build_ramps(void) {
@@ -171,6 +179,7 @@ static void build_ramps(void) {
             }
             double L, C, h;
             rgb_to_oklch(rgb, &L, &C, &h);
+            int water = layer && C >= 0.025 && h >= 225 && h <= 285;   /* the blues of the sea and the shallows */
             for (int i = 0; i < SHADES; i++) {
                 double k = (i - BASE) / 2.0;
                 double LL = L, CC = C, hh = h;
@@ -180,6 +189,9 @@ static void build_ramps(void) {
                     if (C < 0.025) {   /* a grey: cool in shadow */
                         CC = C > 0.010 * n ? C : 0.010 * n;
                         hh = C < 0.01 ? 265 : hue_toward(h, 265, 4.0 * n);
+                    } else if (water) {   /* deep water keeps its saturation: a royal blue, not a grey one */
+                        CC = C * (1 - 0.04 * n);
+                        hh = hue_toward(h, 272, 3.0 * n);
                     } else {
                         double sat = C / L + (0.22 - C / L) * 0.1 * n;
                         CC = sat * (LL > 0 ? LL : 0);
@@ -187,8 +199,9 @@ static void build_ramps(void) {
                     }
                 } else if (k > 0) {
                     LL = L + (1 - L) * 0.24 * k;
-                    CC = C * (1 - 0.12 * k);
-                    if (C >= 0.025) hh = hue_toward(h, 100, 6.0 * k);
+                    CC = C * (1 - (water ? 0.05 : 0.12) * k);
+                    if (water) hh = hue_toward(h, 195, 12.0 * k);   /* crests turn turquoise */
+                    else if (C >= 0.025) hh = hue_toward(h, 100, 6.0 * k);
                 }
                 ramp[layer][e][c][i] = i != BASE ? oklch_to_rgb(LL, CC, hh) : (0xFF000000u | rgb);
             }
@@ -259,7 +272,7 @@ static int load_pack(const char *path) {
     if (!f) return 0;
     uint8_t head[12];
     int n = 0;
-    if (fread(head, 1, 12, f) == 12 && !memcmp(head, "STRM", 4) && head[4] == 1) {
+    if (fread(head, 1, 12, f) == 12 && !memcmp(head, "STRM", 4) && (head[4] == 1 || head[4] == 2)) {
         uint32_t count = head[8] | (head[9] << 8) | ((uint32_t)head[10] << 16) | ((uint32_t)head[11] << 24);
         uint8_t e[67];
         for (uint32_t i = 0; i < count && fread(e, 1, sizeof e, f) == sizeof e; i++) {
@@ -315,9 +328,10 @@ void remaster_frame(uint32_t *out, int stride, const uint8_t *idx, const uint32_
             const uint32_t (*rp)[SHADES] = sprite ? rs : rb;
             if (!ink || (sprite && c == 0)) { o[x] = rp[ir[x] & 0x3F][BASE]; continue; }
             uint8_t nes;
+            const uint8_t *pal = ppu.hd_palettes[HD_PALSET(src)];   /* the palette of the pixel's line */
             if (c == value) nes = ir[x];   /* the color the PPU drew */
-            else if (c == 0) nes = ppu.palette[0] & gray;
-            else nes = ppu.palette[(sprite ? 16 : 0) + HD_PAL(src) * 4 + c] & gray;
+            else if (c == 0) nes = pal[0] & gray;
+            else nes = pal[(sprite ? 16 : 0) + HD_PAL(src) * 4 + c] & gray;
             int step = (ink >> 2) & 7, shade = step ? (step - 1) * 2 + ((ink & REMASTER_HALF) != 0) : BASE;
             o[x] = rp[nes & 0x3F][shade < SHADES ? shade : SHADES - 1];
         }

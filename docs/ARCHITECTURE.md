@@ -241,15 +241,23 @@ records for the decoded map. `remaster_frame` then colors each pixel from the in
 source tile gives that pixel (remaster.h: color 0-3, step 1-7, a half-step bit): the
 tile's palette entry for that color, looked up on that color's ramp, so palette changes
 carry over; an ink that names the pixel's own value takes the color the PPU actually
-drew. Ramps have 13 shades per color and emphasis setting, stepped in OKLCH (lightness
-±0.085 per step downward with the saturation easing toward a common level, toward white
-by 24 % of the remaining distance per step upward, hues turning toward blue in shadow and
-toward yellow in light), from a remastered base palette; backgrounds have a few colors
-of their own (the NES's pink beaches are sand there, sprites keep the pink). Automatic
+drew, one that names another takes it from the palette that pixel's line was drawn with:
+at the start of each line the PPU compares the palette with the frame's snapshots
+(`ppu.hd_palettes`, up to four, outside the save state) and takes a new one when it
+differs, and every source carries its snapshot's number (`HD_PALSET`, bits 28-29), so
+mid-frame palette changes such as the dungeons' status bar stay right. Ramps have 13
+shades per color and emphasis setting, stepped in OKLCH (lightness ±0.085 per step
+downward with the saturation easing toward a common level, toward white by 24 % of the
+remaining distance per step upward, hues turning toward blue in shadow and toward yellow
+in light; background blues, the sea's, keep their saturation in shadow and turn toward
+turquoise in light), from a remastered base palette; backgrounds have a few colors of
+their own (the NES's pink beaches are sand there, sprites keep the pink; the shallows
+are turquoise, stone a warm grey). Automatic
 inks come from each tile's 8x8 pattern; tiles that look like lettering (color 0 and one
 other color, in strokes with no 4x4 square forming at most three connected shapes, which
-speckled textures exceed) keep their colors flat. A pack ("STRM" version 1: tile, layer,
-64 inks) overrides them per tile and layer.
+speckled textures exceed) keep their colors flat. A pack ("STRM" version 2: tile, layer,
+64 inks) overrides them per tile and layer; version 1 packs, made before inks of another color
+followed the line's palette, still load, and builds from before then skip version 2 packs.
 
 **RetroAchievements.** `achievements.c` wraps rc_client: memory reads go through
 `nes_peek` (no side effects, CPU addresses), HTTP requests run on worker threads

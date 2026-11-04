@@ -243,12 +243,13 @@ static inline void render_pixel(int sl, int dot) {
         if (bg_pixel || ((ppu.mask & 0x08) && (x >= 8 || (ppu.mask & 0x02)))) {
             int c = ppu.x + ppu.hd_shifts;
             uint32_t t = c <= 7 ? ppu.hd_tile_a : ppu.hd_tile_b;
-            bgi = HD_PACK(HD_TILE(t), HD_ROW(t), c & 7, bg_pal, bg_pixel);
+            bgi = HD_PACK(HD_TILE(t), HD_ROW(t), c & 7, bg_pal, bg_pixel) | ((uint32_t)ppu.hd_palette_cur << 28);
         }
         if (spr_pixel) {
             uint32_t t = ppu.hd_spr_tile[spr_unit];
             int c = (t & HD_HFLIP) ? 7 - (spr_col & 7) : (spr_col & 7);
-            spi = HD_PACK(HD_TILE(t), HD_ROW(t), c, spr_pal, spr_pixel) | (t & (HD_HFLIP | HD_VFLIP)) | (spr_behind ? HD_BEHIND : 0);
+            spi = HD_PACK(HD_TILE(t), HD_ROW(t), c, spr_pal, spr_pixel) | (t & (HD_HFLIP | HD_VFLIP)) | (spr_behind ? HD_BEHIND : 0) |
+                  ((uint32_t)ppu.hd_palette_cur << 28);
         }
         ppu.hd_bg[sl * 256 + x] = bgi;
         ppu.hd_spr[sl * 256 + x] = spi;
@@ -278,6 +279,16 @@ static inline void ppu_tick(void) {
         }
         if (visible && dot == 1) {
             ppu.line_emph[sl] = ppu.mask;
+            if (ppu_hd_capture) {   /* the palette this line starts with: one of the frame's snapshots */
+                int k = 0;
+                if (sl == 0) ppu.hd_palette_count = 0;
+                while (k < ppu.hd_palette_count && memcmp(ppu.hd_palettes[k], ppu.palette, 32)) k++;
+                if (k == ppu.hd_palette_count) {   /* a new one (past four, the last is replaced) */
+                    if (k == 4) k = 3; else ppu.hd_palette_count++;
+                    memcpy(ppu.hd_palettes[k], ppu.palette, 32);
+                }
+                ppu.hd_palette_cur = (uint8_t)k;
+            }
             if (sl == 0) {   /* what this frame's background is drawn with */
                 /* t, not v: v has already been advanced by the two prefetched tiles */
                 ppu.frame_t = ppu.t; ppu.frame_x = ppu.x; ppu.frame_ctrl = ppu.ctrl;

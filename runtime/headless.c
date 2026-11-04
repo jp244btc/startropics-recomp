@@ -333,17 +333,21 @@ int main(int argc, char **argv) {
 
     if (png) { fb_to_rgb(rgb); png_write_rgb(png, 256, 240, rgb); }
     if (remaster) write_remastered(remaster, rgb);
-    if (hd_dump) {   /* "STHD" 2, scroll t, fine x, ctrl, palette[32], line masks[240], fb, hd_bg, hd_spr (little-endian) */
+    if (hd_dump) {   /* "STHD" 3, scroll t, fine x, ctrl, palette[32], line masks[240], fb, hd_bg, hd_spr (little-endian),
+                        the number of palette snapshots, 3 bytes padding and the four snapshots (ppu.hd_palettes) */
         FILE *f = fopen(hd_dump, "wb");
         if (f) {
             uint8_t scroll[4] = { (uint8_t)ppu.frame_t, (uint8_t)(ppu.frame_t >> 8), ppu.frame_x, ppu.frame_ctrl };
-            fwrite("STHD\2\0\0\0", 1, 8, f);
+            fwrite("STHD\3\0\0\0", 1, 8, f);
             fwrite(scroll, 1, 4, f);
             fwrite(ppu.palette, 1, 32, f);
             fwrite(ppu.line_emph, 1, 240, f);
             fwrite(ppu.fb, 1, sizeof ppu.fb, f);
             fwrite(ppu.hd_bg, 4, 256 * 240, f);
             fwrite(ppu.hd_spr, 4, 256 * 240, f);
+            uint8_t count[4] = { ppu.hd_palette_count, 0, 0, 0 };
+            fwrite(count, 1, 4, f);
+            fwrite(ppu.hd_palettes, 1, sizeof ppu.hd_palettes, f);
             fclose(f);
         }
     }

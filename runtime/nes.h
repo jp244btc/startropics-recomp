@@ -116,6 +116,11 @@ typedef struct {
     uint8_t  hd_shifts;                        /* shifts since the last reload */
     uint32_t hd_spr_tile[64];                  /* each sprite unit of the line: tile, row, flips */
     uint8_t  hd_spr_col[64];                   /* its pixels shifted out so far */
+    /* the palettes the frame was drawn with (a game may change them between lines, as StarTropics
+       does for the dungeons' status bar): a snapshot whenever a line starts with a palette unlike
+       the frame's earlier ones, up to four; every pixel's source names its own (HD_PALSET) */
+    uint8_t  hd_palettes[4][32];
+    uint8_t  hd_palette_count, hd_palette_cur;
 } ppu_t;
 
 /* A pixel's source, for the enhanced graphics: the 16-byte tile of the cartridge's CHR ROM
@@ -131,6 +136,7 @@ typedef struct {
 #define HD_VFLIP       (1u << 25)
 #define HD_BEHIND      (1u << 26)
 #define HD_PRESENT     (1u << 27)
+#define HD_PALSET(i)   (((i) >> 28) & 3)   /* the palette snapshot it was drawn with (ppu.hd_palettes) */
 #define HD_TILE_NONE   0x3FFF
 #define HD_PACK(tile, row, col, pal, value) \
     (HD_PRESENT | ((uint32_t)(tile) & 0x3FFF) | ((uint32_t)(row) << 14) | ((uint32_t)(col) << 17) | \

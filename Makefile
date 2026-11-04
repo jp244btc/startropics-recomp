@@ -61,7 +61,8 @@ ifeq ($(DECK_EDITION),1)
   PLATFORM := steamdeck
 endif
 
-FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c frontend/touchpad.c
+FRONTEND_SRC := frontend/sdl_main.c frontend/font.c frontend/ui.c frontend/filedialog.c frontend/audio_out.c frontend/input.c frontend/gpu_sync.c frontend/icon_data.c frontend/rewind.c frontend/touchpad.c \
+                frontend/http.c frontend/update.c
 
 # ---- RetroAchievements (optional): third_party/rcheevos.mk defines RCHEEVOS_SRC / RCHEEVOS_CFLAGS /
 #      RCHEEVOS_LIBS when the MIT-licensed rcheevos library is vendored; frontend/achievements.c uses it.
@@ -77,6 +78,30 @@ else
   RCHEEVOS_OBJ :=
   RCHEEVOS_LIBS :=
 endif
+# ---- HTTP (frontend/http.c: RetroAchievements and the update check): WinHTTP on Windows; elsewhere
+#      libcurl, whose headers are needed to build while the library itself is loaded at run time, so
+#      the program also starts on systems without it (the online features then say so)
+ifeq ($(WINDOWS),1)
+  HTTP_LIBS := -lwinhttp
+else ifneq ($(shell pkg-config --exists libcurl 2>/dev/null && echo yes),)
+  HTTP_CFLAGS := -DHTTP_CURL_DLOPEN $(shell pkg-config --cflags libcurl)
+  HTTP_LIBS := -ldl -lpthread
+endif
+
+# ---- the Updates tab: this build's version (git describe: the newest v* tag, plus the commits after
+#      it), the GitHub repository whose releases it checks (from the git remote) and its package
+#      there (the name `make dist` gives it). Builds without git, such as the container of
+#      tools/linux/build.sh, take ST_VERSION and ST_REPO from the environment. A stamp file rebuilds
+#      frontend/update.c when they change.
+ST_VERSION ?= $(or $(shell git describe --tags --match "v[0-9]*" --dirty 2>/dev/null),dev)
+ST_REPO ?= $(shell git remote get-url origin 2>/dev/null | sed -n -E 's|^.*github\.com[:/]+([^/]+/[^/]+)$$|\1|p' | sed 's|\.git$$||')
+UPDATE_DEFS := -DST_VERSION=\"$(ST_VERSION)\" -DST_REPO=\"$(ST_REPO)\" \
+               -DST_PACKAGE=\"startropics-$(PLATFORM).$(if $(filter zip,$(ARCHIVE)),zip,tar.gz)\"
+ifneq ($(UPDATE_DEFS),$(file <$(BUILD)/update-defs.txt))
+  $(shell mkdir -p $(BUILD))
+  $(file >$(BUILD)/update-defs.txt,$(UPDATE_DEFS))
+endif
+
 FRONTEND_OBJ := $(patsubst frontend/%.c,$(BUILD)/fe_%.o,$(FRONTEND_SRC)) $(RCHEEVOS_OBJ)
 ifeq ($(WINDOWS),1)
   # executable icon + version info (Explorer, taskbar)
@@ -121,7 +146,7 @@ startropics: $(BUILD)/startropics$(EXE)
 
 $(BUILD)/startropics$(EXE): $(RUNTIME_OBJ) $(FRONTEND_OBJ) $(GEN_OBJ)
 	@test -n "$(GEN_SRC)" || (echo "no generated code: run 'make recomp' first" && exit 1)
-	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(RCHEEVOS_LIBS) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) $^ -o $@ $(SDL_LIBS) $(RCHEEVOS_LIBS) $(HTTP_LIBS) $(LDFLAGS) -lm
 
 # rcheevos sources compile with their own flags (search path for the vendored tree)
 define RC_RULE
@@ -131,9 +156,12 @@ $(BUILD)/rc/$(notdir $(basename $(1))).o: $(1)
 endef
 $(foreach src,$(RCHEEVOS_SRC),$(eval $(call RC_RULE,$(src))))
 
-$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h runtime/remaster.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h frontend/touchpad.h
+$(BUILD)/fe_%.o: frontend/%.c runtime/nes.h runtime/widescreen.h runtime/remaster.h frontend/font.h frontend/ui.h frontend/filedialog.h frontend/audio_out.h frontend/input.h frontend/gpu_sync.h frontend/achievements.h frontend/rewind.h frontend/touchpad.h frontend/http.h frontend/update.h
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(RCHEEVOS_CFLAGS) -Iruntime -c $< -o $@
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(RCHEEVOS_CFLAGS) $(HTTP_CFLAGS) -Iruntime -c $< -o $@
+
+$(BUILD)/fe_update.o: CFLAGS += $(UPDATE_DEFS)
+$(BUILD)/fe_update.o: $(BUILD)/update-defs.txt
 
 $(BUILD)/fe_resources.o: frontend/startropics.rc frontend/startropics.ico
 	@mkdir -p $(BUILD)

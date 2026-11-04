@@ -1,7 +1,7 @@
 #!/bin/sh
 # tools/linux/build.sh - builds and tests the Linux and Steam Deck packages. Run it inside the
-# container made from tools/linux/Dockerfile (see there). Needs generated/ (make recomp);
-# the tests also need your cartridge dump in rom/.
+# container made from tools/linux/Dockerfile (see there; it also says how to give the builds
+# their version). Needs generated/ (make recomp); the tests also need your cartridge dump in rom/.
 set -e
 cd "$(dirname "$0")/../.."
 J=$(nproc)
@@ -28,6 +28,7 @@ if [ -n "$ROM" ]; then
         grep -E "^(display_mode|aspect|scaling|resolution)=" $b/startropics.ini | tr '\n' ' '; echo
         sed -i 's/^textures=.*/textures=1/' $b/startropics.ini   # the remastered graphics
         ./$b/startropics "$ROM" --game-shot "/tmp/tex-$b.png" 900 | grep game-shot
+        ./$b/startropics --update-check | tail -n 2 || true   # the Updates tab's check (needs the network)
     done
 fi
 

@@ -60,6 +60,9 @@ Notes
 - Graphics > Textures: Remastered recolors and shades the game in the manner of the Pixel
   Remaster games. A hand-made tile pack, remaster.pak, if you have one, goes in
   Android/data/org.startropics.nativeport/files/ (…nativeport.touch for the phone app).
+- Updates: the Updates tab checks GitHub for a newer version and opens its release page;
+  download the APK of your edition there and open it, and it installs over the app with
+  its saves and settings kept (Android asks once to allow installs from the browser).
 - A log of the last run is written to Android/data/org.startropics.nativeport/files/
   startropics-log.txt (.touch for the phone app; handy with `adb pull` when something goes
   wrong).

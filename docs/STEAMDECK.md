@@ -49,6 +49,9 @@ Tips
 - Graphics > Textures: Remastered recolors and shades the game in the manner of the
   Pixel Remaster games (more colors per tile, soft light from the upper left). A
   hand-made tile pack, remaster.pak, if you have one, goes in the game folder.
+- Updates: Check for updates on the menu's Updates tab, then Install, installs a new
+  release in place (the previous version stays as startropics.old); Restart now brings
+  you straight back in, still in the same Steam session. No ssh or Desktop Mode needed.
 - Saves (the game's own and the 9 save state slots), settings and screenshots are kept
   in the game folder.
 - RetroAchievements: log in on the menu's Achievements tab. The password is only sent

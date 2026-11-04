@@ -91,7 +91,7 @@ static void rgb_to_oklch(uint32_t rgb, double *L, double *C, double *h) {
     double A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
     double B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
     *L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
-    *C = hypot(A, B);
+    *C = sqrt(A * A + B * B);   /* not hypot(): glibc 2.35 gave it a new symbol version, and the Linux build runs on 2.34 */
     *h = fmod(atan2(B, A) * 180 / M_PI + 360, 360);
 }
 

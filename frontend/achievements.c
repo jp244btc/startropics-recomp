@@ -4,12 +4,10 @@
  *
  * Threading: every ach_* function, and therefore every rc_client call, runs on the main
  * thread. rc_client asks for HTTP through server_call(); the request is copied and run on
- * a detached SDL worker thread (WinHTTP on Windows; libcurl when RC_HTTP_CURL is defined, or
- * loaded at run time with RC_HTTP_CURL_DLOPEN (Linux); the Java side's HttpURLConnection on
- * Android; otherwise requests fail with a clear message). Finished requests land in a
- * mutex-protected queue that ach_pump() drains on the main thread, handing each response
- * to rc_client there. ach_shutdown() raises a flag so completions that arrive afterwards
- * are dropped instead of touching a destroyed client.
+ * a detached SDL worker thread (http.c: WinHTTP, libcurl or the Java side, by platform).
+ * Finished requests land in a mutex-protected queue that ach_pump() drains on the main
+ * thread, handing each response to rc_client there. ach_shutdown() raises a flag so
+ * completions that arrive afterwards are dropped instead of touching a destroyed client.
  *
  * Session: <data_dir>retroachievements.txt holds two lines, user name and session token.
  * The password only ever travels to the server inside ach_login(). Nothing secret is
@@ -31,65 +29,7 @@
 #  include <windows.h>
 #endif
 
-#if defined(RC_HTTP_CURL) || defined(RC_HTTP_CURL_DLOPEN)
-#  define CURL_DISABLE_TYPECHECK 1
-#  include <curl/curl.h>
-#  define ACH_HTTP_CURL 1
-#  ifdef RC_HTTP_CURL_DLOPEN
-#    include <dlfcn.h>
-/* libcurl is loaded at run time, so the program also starts where it is not installed
-   (RetroAchievements then says so instead of the program failing to launch) */
-static struct {
-    int loaded;
-    CURLcode (*global_init)(long);
-    CURL *(*easy_init)(void);
-    CURLcode (*easy_setopt)(CURL *, CURLoption, ...);
-    CURLcode (*easy_perform)(CURL *);
-    CURLcode (*easy_getinfo)(CURL *, CURLINFO, ...);
-    void (*easy_cleanup)(CURL *);
-    const char *(*easy_strerror)(CURLcode);
-    struct curl_slist *(*slist_append)(struct curl_slist *, const char *);
-    void (*slist_free_all)(struct curl_slist *);
-} dl_curl;
-
-static int curl_load(void) {
-    static const char *const names[] = { "libcurl.so.4", "libcurl-gnutls.so.4", "libcurl.so" };
-    void *h = NULL;
-    for (size_t i = 0; i < sizeof names / sizeof names[0] && !h; i++) h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
-    if (!h) return 0;
-#    define DL_CURL(field, sym) if (!(*(void **)&dl_curl.field = dlsym(h, sym))) return 0
-    DL_CURL(global_init, "curl_global_init");
-    DL_CURL(easy_init, "curl_easy_init");
-    DL_CURL(easy_setopt, "curl_easy_setopt");
-    DL_CURL(easy_perform, "curl_easy_perform");
-    DL_CURL(easy_getinfo, "curl_easy_getinfo");
-    DL_CURL(easy_cleanup, "curl_easy_cleanup");
-    DL_CURL(easy_strerror, "curl_easy_strerror");
-    DL_CURL(slist_append, "curl_slist_append");
-    DL_CURL(slist_free_all, "curl_slist_free_all");
-#    undef DL_CURL
-    dl_curl.loaded = 1;
-    return 1;
-}
-#    undef curl_easy_setopt      /* curl.h's pass-through argument-count macros */
-#    undef curl_easy_getinfo
-#    define curl_global_init    dl_curl.global_init
-#    define curl_easy_init      dl_curl.easy_init
-#    define curl_easy_setopt    dl_curl.easy_setopt
-#    define curl_easy_perform   dl_curl.easy_perform
-#    define curl_easy_getinfo   dl_curl.easy_getinfo
-#    define curl_easy_cleanup   dl_curl.easy_cleanup
-#    define curl_easy_strerror  dl_curl.easy_strerror
-#    define curl_slist_append   dl_curl.slist_append
-#    define curl_slist_free_all dl_curl.slist_free_all
-#  endif
-#elif defined(_WIN32)
-#  include <winhttp.h>
-#  define ACH_HTTP_WINHTTP 1
-#elif defined(__ANDROID__)
-#  include <jni.h>
-#  define ACH_HTTP_ANDROID 1
-#endif
+#include "http.h"
 
 #include <SDL.h>
 #include <stdarg.h>
@@ -321,293 +261,38 @@ static void http_job_complete(http_job_t *job) {
     SDL_UnlockMutex(g_queue_mutex);
 }
 
-#ifdef ACH_HTTP_WINHTTP
-static wchar_t *utf8_to_wide(const char *s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    wchar_t *w;
-    if (n <= 0) return NULL;
-    w = (wchar_t *)malloc((size_t)n * sizeof *w);
-    if (!w) return NULL;
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
-    return w;
-}
-
-static const char *winhttp_error_text(DWORD err) {
-    switch (err) {
-    case ERROR_WINHTTP_NAME_NOT_RESOLVED: return "the server name could not be resolved";
-    case ERROR_WINHTTP_CANNOT_CONNECT:    return "a connection could not be established";
-    case ERROR_WINHTTP_TIMEOUT:           return "the request timed out";
-    case ERROR_WINHTTP_SECURE_FAILURE:    return "the TLS connection failed";
-    case ERROR_WINHTTP_CONNECTION_ERROR:  return "the connection was reset";
-    default:                              return "the request failed";
-    }
-}
-
 /* runs on the worker thread: fills job->body / body_len / status */
 static void http_perform(http_job_t *job) {
-    wchar_t *wurl = NULL, *wagent = NULL, *wpath = NULL, *wheaders = NULL;
-    wchar_t host[256];
-    HINTERNET session = NULL, conn = NULL, req = NULL;
-    URL_COMPONENTSW uc;
-    DWORD status = 0, status_size = sizeof status, err;
-    const char *stage = "connecting";
-    char message[256];
-
+    http_request_t rq;
+    http_response_t rs;
+    memset(&rq, 0, sizeof rq);
+    rq.url = job->url;
+    rq.post = job->post_data;
+    rq.post_len = job->post_len;
+    rq.content_type = job->content_type;
+    rq.user_agent = g_user_agent;
+    rq.timeout_ms = ACH_HTTP_TIMEOUT_MS;
     free(job->body);
     job->body = NULL;
     job->body_len = 0;
-
-    wurl = utf8_to_wide(job->url);
-    wagent = utf8_to_wide(g_user_agent);
-    if (!wurl || !wagent) { http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory"); goto done; }
-
-    memset(&uc, 0, sizeof uc);
-    uc.dwStructSize = sizeof uc;
-    uc.dwSchemeLength = (DWORD)-1;      /* NULL pointers + nonzero lengths: WinHttpCrackUrl points into wurl */
-    uc.dwHostNameLength = (DWORD)-1;
-    uc.dwUrlPathLength = (DWORD)-1;
-    uc.dwExtraInfoLength = (DWORD)-1;
-    if (!WinHttpCrackUrl(wurl, 0, 0, &uc) || uc.dwHostNameLength == 0 ||
-        uc.dwHostNameLength >= sizeof host / sizeof host[0]) {
-        http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "invalid request URL");
-        goto done;
-    }
-    memcpy(host, uc.lpszHostName, uc.dwHostNameLength * sizeof host[0]);
-    host[uc.dwHostNameLength] = L'\0';
-    {
-        size_t plen = uc.dwUrlPathLength, elen = uc.dwExtraInfoLength, n = 0;
-        wpath = (wchar_t *)malloc((plen + elen + 2) * sizeof *wpath);
-        if (!wpath) { http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory"); goto done; }
-        if (plen) { memcpy(wpath, uc.lpszUrlPath, plen * sizeof *wpath); n = plen; }
-        else wpath[n++] = L'/';
-        if (elen) { memcpy(wpath + n, uc.lpszExtraInfo, elen * sizeof *wpath); n += elen; }
-        wpath[n] = L'\0';
-    }
-
-    session = WinHttpOpen(wagent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session)   /* automatic proxy discovery needs Windows 8.1; fall back to the WinHTTP default proxy */
-        session = WinHttpOpen(wagent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) goto fail;
-    WinHttpSetTimeouts(session, ACH_HTTP_TIMEOUT_MS, ACH_HTTP_TIMEOUT_MS, ACH_HTTP_TIMEOUT_MS, ACH_HTTP_TIMEOUT_MS);
-
-    conn = WinHttpConnect(session, host, uc.nPort, 0);
-    if (!conn) goto fail;
-    req = WinHttpOpenRequest(conn, job->post_data ? L"POST" : L"GET", wpath, NULL, WINHTTP_NO_REFERER,
-                             WINHTTP_DEFAULT_ACCEPT_TYPES, uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
-    if (!req) goto fail;
-
-    if (job->post_data) {
-        char header[256];
-        snprintf(header, sizeof header, "Content-Type: %s\r\n", job->content_type);
-        wheaders = utf8_to_wide(header);
-        if (!wheaders) { http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory"); goto done; }
-    }
-
-    stage = "sending the request";
-    if (!WinHttpSendRequest(req, wheaders, wheaders ? (DWORD)-1 : 0,
-                            job->post_len ? (LPVOID)job->post_data : WINHTTP_NO_REQUEST_DATA,
-                            (DWORD)job->post_len, (DWORD)job->post_len, 0))
-        goto fail;
-
-    stage = "waiting for the response";
-    if (!WinHttpReceiveResponse(req, NULL)) goto fail;
-    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                             &status, &status_size, WINHTTP_NO_HEADER_INDEX))
-        goto fail;
-
-    stage = "reading the response";
-    for (;;) {
-        DWORD avail = 0, got = 0;
-        char *grown;
-        if (!WinHttpQueryDataAvailable(req, &avail)) goto fail;
-        if (avail == 0) break;
-        grown = (char *)realloc(job->body, job->body_len + avail + 1);
-        if (!grown) { http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory"); goto done; }
-        job->body = grown;
-        if (!WinHttpReadData(req, job->body + job->body_len, avail, &got)) goto fail;
-        if (got == 0) break;
-        job->body_len += got;
-    }
-    if (!job->body) {
-        job->body = (char *)calloc(1, 1);
-        if (!job->body) { http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory"); goto done; }
-    }
-    job->body[job->body_len] = '\0';
-    job->status = (int)status;
-    goto done;
-
-fail:
-    err = GetLastError();
-    snprintf(message, sizeof message, "Could not reach the RetroAchievements server while %s: %s (WinHTTP error %lu)",
-             stage, winhttp_error_text(err), (unsigned long)err);
-    http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, message);
-
-done:
-    if (req) WinHttpCloseHandle(req);
-    if (conn) WinHttpCloseHandle(conn);
-    if (session) WinHttpCloseHandle(session);
-    free(wheaders);
-    free(wpath);
-    free(wagent);
-    free(wurl);
-}
-#endif /* ACH_HTTP_WINHTTP */
-
-#ifdef ACH_HTTP_CURL
-static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    http_job_t *job = (http_job_t *)userdata;
-    size_t n = size * nmemb;
-    char *grown = (char *)realloc(job->body, job->body_len + n + 1);
-    if (!grown) return 0;
-    job->body = grown;
-    memcpy(job->body + job->body_len, ptr, n);
-    job->body_len += n;
-    job->body[job->body_len] = '\0';
-    return n;
-}
-
-/* runs on the worker thread: fills job->body / body_len / status */
-static void http_perform(http_job_t *job) {
-    CURL *curl;
-    struct curl_slist *headers = NULL;
-    char errbuf[CURL_ERROR_SIZE];
-    CURLcode rc;
-
-    free(job->body);
-    job->body = NULL;
-    job->body_len = 0;
-    errbuf[0] = '\0';
-
-#ifdef RC_HTTP_CURL_DLOPEN
-    if (!dl_curl.loaded) {
-        http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR,
-                      "libcurl (libcurl.so.4) is not installed, so RetroAchievements cannot connect");
-        return;
-    }
-#endif
-    curl = curl_easy_init();
-    if (!curl) { http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "could not initialise libcurl"); return; }
-
-    curl_easy_setopt(curl, CURLOPT_URL, job->url);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, g_user_agent);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, job);
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)ACH_HTTP_TIMEOUT_MS);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)ACH_HTTP_TIMEOUT_MS);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (job->post_data) {
-        char header[256];
-        snprintf(header, sizeof header, "Content-Type: %s", job->content_type);
-        headers = curl_slist_append(headers, header);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, job->post_data);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)job->post_len);
-    }
-
-    rc = curl_easy_perform(curl);
-    if (rc == CURLE_OK) {
-        long code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-        if (!job->body) job->body = (char *)calloc(1, 1);
-        if (!job->body) http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory");
-        else job->status = (int)code;
+    if (http_request(&rq, &rs)) {
+        job->body = rs.body;
+        job->body_len = rs.len;
+        job->status = rs.status;
     } else {
-        char message[256];
-        snprintf(message, sizeof message, "Could not reach the RetroAchievements server: %s",
-                 errbuf[0] ? errbuf : curl_easy_strerror(rc));
-        http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, message);
+        char message[320];
+        snprintf(message, sizeof message, "Could not reach the RetroAchievements server: %s", rs.error);
+        http_job_fail(job, rs.retryable ? RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR : RC_API_SERVER_RESPONSE_CLIENT_ERROR,
+                      message);
     }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-}
-#endif /* ACH_HTTP_CURL */
-
-#ifdef ACH_HTTP_ANDROID
-/* HTTP through the app's Java side (HttpURLConnection). StarTropicsActivity.httpRequest returns
-   the status as 4 big-endian bytes, then the body; status 0 means the body is an error message. */
-static jclass g_http_class;
-static jmethodID g_http_method;
-
-/* main thread: a native worker thread cannot look up the app's own classes */
-static void android_http_init(void) {
-    if (g_http_class) return;
-    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
-    if (!env) return;
-    jclass cls = (*env)->FindClass(env, "org/startropics/nativeport/StarTropicsActivity");
-    if (!cls) { (*env)->ExceptionClear(env); return; }
-    jmethodID m = (*env)->GetStaticMethodID(env, cls, "httpRequest",
-                                            "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;I)[B");
-    if (!m) { (*env)->ExceptionClear(env); (*env)->DeleteLocalRef(env, cls); return; }
-    g_http_class = (jclass)(*env)->NewGlobalRef(env, cls);
-    g_http_method = m;
-    (*env)->DeleteLocalRef(env, cls);
 }
 
-/* runs on the worker thread (SDL attaches it to the Java VM): fills job->body / body_len / status */
-static void http_perform(http_job_t *job) {
-    free(job->body);
-    job->body = NULL;
-    job->body_len = 0;
-    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
-    if (!env || !g_http_class) {
-        http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "the network bridge is not available");
-        return;
-    }
-    jstring jurl = (*env)->NewStringUTF(env, job->url);
-    jstring jct = (*env)->NewStringUTF(env, job->content_type);
-    jstring jua = (*env)->NewStringUTF(env, g_user_agent);
-    jbyteArray jpost = NULL;
-    if (job->post_data) {
-        jpost = (*env)->NewByteArray(env, (jsize)job->post_len);
-        if (jpost) (*env)->SetByteArrayRegion(env, jpost, 0, (jsize)job->post_len, (const jbyte *)job->post_data);
-    }
-    jbyteArray res = (jbyteArray)(*env)->CallStaticObjectMethod(env, g_http_class, g_http_method, jurl, jpost, jct, jua,
-                                                                (jint)ACH_HTTP_TIMEOUT_MS);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); res = NULL; }
-    jsize n = res ? (*env)->GetArrayLength(env, res) : 0;
-    if (n < 4) {
-        http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, "Could not reach the RetroAchievements server");
-    } else {
-        jbyte *b = (*env)->GetByteArrayElements(env, res, NULL);
-        int status = (int)(((uint32_t)(uint8_t)b[0] << 24) | ((uint32_t)(uint8_t)b[1] << 16) |
-                           ((uint32_t)(uint8_t)b[2] << 8) | (uint32_t)(uint8_t)b[3]);
-        size_t blen = (size_t)(n - 4);
-        if (status <= 0) {
-            char message[300];
-            snprintf(message, sizeof message, "Could not reach the RetroAchievements server: %.*s",
-                     (int)(blen < 200 ? blen : 200), (const char *)b + 4);
-            http_job_fail(job, RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR, message);
-        } else {
-            job->body = (char *)malloc(blen + 1);
-            if (!job->body) {
-                http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory");
-            } else {
-                memcpy(job->body, b + 4, blen);
-                job->body[blen] = '\0';
-                job->body_len = blen;
-                job->status = status;
-            }
-        }
-        (*env)->ReleaseByteArrayElements(env, res, b, JNI_ABORT);
-    }
-    if (res) (*env)->DeleteLocalRef(env, res);
-    if (jpost) (*env)->DeleteLocalRef(env, jpost);
-    (*env)->DeleteLocalRef(env, jua);
-    (*env)->DeleteLocalRef(env, jct);
-    (*env)->DeleteLocalRef(env, jurl);
-}
-#endif /* ACH_HTTP_ANDROID */
-
-#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL) || defined(ACH_HTTP_ANDROID)
 static int SDLCALL http_worker(void *arg) {
     http_job_t *job = (http_job_t *)arg;
     http_perform(job);
     http_job_complete(job);
     return 0;
 }
-#endif
 
 /* rc_client -> us: issue a request. The request strings only live until we return, so copy them. */
 static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_server_callback_t callback,
@@ -629,7 +314,6 @@ static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_serv
         http_job_complete(job);
         return;
     }
-#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL) || defined(ACH_HTTP_ANDROID)
     {
         SDL_Thread *thread = SDL_CreateThread(http_worker, "ra-http", job);
         if (!thread) {
@@ -639,10 +323,6 @@ static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_serv
         }
         SDL_DetachThread(thread);
     }
-#else
-    http_job_fail(job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "online features are not available in this build");
-    http_job_complete(job);
-#endif
 }
 
 /* main thread: hand every finished request to rc_client */
@@ -886,23 +566,10 @@ int ach_init(const char *data_dir) {
     g_shutting_down = 0;
     SDL_UnlockMutex(g_queue_mutex);
     g_client_gen++;
-#ifdef ACH_HTTP_CURL
     {
-        static int curl_ready;
-        if (!curl_ready) {
-#ifdef RC_HTTP_CURL_DLOPEN
-            if (curl_load()) curl_global_init(CURL_GLOBAL_DEFAULT);
-            else printf("[ra] libcurl.so.4 not found: RetroAchievements cannot connect\n");
-#else
-            curl_global_init(CURL_GLOBAL_DEFAULT);
-#endif
-            curl_ready = 1;
-        }
+        const char *why;
+        if (!http_init(&why)) printf("[ra] %s: RetroAchievements cannot connect\n", why);
     }
-#endif
-#ifdef ACH_HTTP_ANDROID
-    android_http_init();
-#endif
     g_client = rc_client_create(read_memory, server_call);
     if (!g_client) return -1;
     rc_client_enable_logging(g_client, RC_CLIENT_LOG_LEVEL_INFO, log_message);
@@ -1118,11 +785,8 @@ int ach_test_http_get(const char *url, char **body, size_t *body_len, int *http_
     if (!job.url || !job.content_type) {
         http_job_fail(&job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "out of memory");
     } else {
-#if defined(ACH_HTTP_WINHTTP) || defined(ACH_HTTP_CURL)
+        http_init(NULL);
         http_perform(&job);
-#else
-        http_job_fail(&job, RC_API_SERVER_RESPONSE_CLIENT_ERROR, "online features are not available in this build");
-#endif
     }
     *body = job.body;
     *body_len = job.body_len;

@@ -6,7 +6,9 @@
 # libcurl's headers are here for RetroAchievements; the library itself is loaded at run time.
 #
 #   docker build -t startropics-linux tools/linux
-#   docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src startropics-linux sh tools/linux/build.sh
+#   docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e ST_VERSION -e ST_REPO -v "$PWD":/src -w /src startropics-linux sh tools/linux/build.sh
+# The container has no git, so export ST_VERSION and ST_REPO (see the Makefile) before running it:
+#   export ST_VERSION="$(git describe --tags --match 'v[0-9]*' --dirty)" ST_REPO=owner/name
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \

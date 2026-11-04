@@ -31,6 +31,8 @@ frontend/sdl_main.c  SDL2 player: menu, scaling and shader passes, run-ahead, sa
 frontend/ui.c        the tabbed menu (choices, numbers, key capture, text rows)
 frontend/rewind.c    rewind history: XOR deltas, run-length coded, in a byte ring
 frontend/achievements.c  RetroAchievements on rcheevos (third_party/rcheevos); achievements_stub.c without it
+frontend/update.c    the Updates tab: the newest GitHub release, its download, check and installation
+frontend/http.c      blocking HTTPS for worker threads: WinHTTP, libcurl (loaded at run time) or the Java side
 ```
 
 Options that are not machine state (`ppu_no_sprite_limit`) live outside the
@@ -253,6 +255,22 @@ and are delivered on the main thread from `ach_pump()`, `ach_frame()` runs the
 achievement logic once per real frame (not run-ahead or rewind frames), and the
 frontend honours hardcore mode by refusing state loads and rewind and by
 resetting the machine when the client asks for it.
+
+**Updates.** The build knows its version (`ST_VERSION`, from `git describe`), the GitHub
+repository it came from (`ST_REPO`, from the `origin` remote) and the name of its
+package in a release (`ST_PACKAGE`, as `make dist` names it); the Makefile passes them
+to `update.c` only, through a stamp file that recompiles it when they change. The
+check reads `releases/latest` from the GitHub API with a small JSON walker that looks
+only at an object's own members, compares the tag numerically (a build with commits
+after the tag counts as newer), and finds the package among the assets with its size
+and SHA-256 digest. Installing runs on a worker thread: download (progress through
+atomics the menu reads), size and digest check, the system `tar` (`System32\tar.exe`
+reads zip files; on Linux without `LD_PRELOAD`, which Steam fills with its overlay),
+then two renames, the running program to `<name>.old` and the new one into its place,
+undone if the second fails. The restart happens after the normal shutdown: `execv` on
+Linux, which keeps the process id a Steam session watches, a new process on Windows.
+`--update-test VERSION args...` runs the same steps as if the build were VERSION and
+then restarts into the new program with `args` (scratch folders only).
 
 ## Where to take it next
 

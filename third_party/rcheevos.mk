@@ -8,13 +8,7 @@ RCHEEVOS_SRC := $(wildcard $(RC_DIR)/src/api/*.c) $(wildcard $(RC_DIR)/src/clien
 # no disc / zip / encrypted-image hashing: this player only ever loads one NES cartridge dump
 RCHEEVOS_CFLAGS := -I$(RC_DIR)/include -I$(RC_DIR)/src -DRC_CLIENT_SUPPORTS_HASH \
                    -DRC_HASH_NO_DISC -DRC_HASH_NO_ENCRYPTED -DRC_HASH_NO_ZIP
-ifeq ($(WINDOWS),1)
-  RCHEEVOS_LIBS := -lwinhttp
-else ifneq ($(shell pkg-config --exists libcurl 2>/dev/null && echo yes),)
-  # libcurl's headers at build time only: the library itself is loaded at run time (dlopen), so the
-  # program also starts on systems without it (RetroAchievements then reports that it is missing)
-  RCHEEVOS_CFLAGS += -DRC_HTTP_CURL_DLOPEN $(shell pkg-config --cflags libcurl)
-  RCHEEVOS_LIBS := -ldl -lpthread
-else
+# (its HTTP goes through frontend/http.c, set up by the Makefile)
+ifneq ($(WINDOWS),1)
   RCHEEVOS_LIBS := -lpthread
 endif

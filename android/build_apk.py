@@ -123,7 +123,8 @@ def build_native(t, sdl, abi):
     run([t["cmake"], "-S", cm(HERE), "-B", cm(out), "-G", "Ninja", "-DCMAKE_MAKE_PROGRAM=" + cm(t["ninja"]),
          "-DCMAKE_TOOLCHAIN_FILE=" + cm(os.path.join(t["ndk"], "build", "cmake", "android.toolchain.cmake")),
          "-DANDROID_ABI=" + abi, "-DANDROID_PLATFORM=android-%d" % MIN_SDK, "-DCMAKE_BUILD_TYPE=Release",
-         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DSDL2_SOURCE_DIR=" + cm(sdl)])
+         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DSDL2_SOURCE_DIR=" + cm(sdl),
+         "-DST_VERSION=" + version()[1], "-DST_REPO=" + repository()])
     run([t["cmake"], "--build", out])
     libs = {}
     for name in ("libSDL2.so", "libmain.so"):
@@ -170,13 +171,29 @@ def build_icons():
     return res
 
 
+def git(*args):
+    return subprocess.check_output(["git"] + list(args), cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+
+
 def version():
+    """(versionCode, versionName): the number of commits, and git describe (the newest v* tag, plus the
+    commits after it), as the Makefile gives the desktop builds"""
     try:
-        count = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD"], cwd=ROOT, text=True).strip())
-        short = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True).strip()
+        count = int(git("rev-list", "--count", "HEAD"))
+        name = git("describe", "--tags", "--match", "v[0-9]*", "--dirty")
     except (OSError, subprocess.CalledProcessError, ValueError):
-        count, short = 1, "local"
-    return count, "1.0.%d-%s" % (count, short)
+        return 1, "dev"
+    return count, name[1:] if name.startswith("v") else name
+
+
+def repository():
+    """owner/name of the GitHub repository this checkout came from (its releases are what the
+    Updates tab offers), or "" """
+    try:
+        m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(\.git)?$", git("remote", "get-url", "origin"))
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return m.group(1) if m else ""
 
 
 def edition_manifest(edition):

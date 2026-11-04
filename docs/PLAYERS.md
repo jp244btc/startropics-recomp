@@ -48,6 +48,7 @@ Controls      Rebind the eight NES buttons and the rewind key (select a row, pre
               Enter, press the key or pad button)
 Achievements  RetroAchievements: log in, hardcore mode, progress (below)
 ROM           Choose or change the cartridge dump
+Updates       Check for a newer version and install it (below)
 
 Default keys
 ------------
@@ -115,6 +116,19 @@ identified by its hash the way RetroAchievements does it (StarTropics USA is
 game 1985 there). This support is built on the rcheevos library (MIT licence,
 see LICENSE-rcheevos.txt).
 
+Updates
+-------
+The Updates tab shows this program's version. Check for updates asks GitHub for
+the newest release (only when you press it). When there is a newer one, Install
+version X downloads it, checks it against the checksum GitHub lists for it and puts
+it in place of this program; your settings, saves, ROM and texture packs stay as they
+are, and the previous version is kept as startropics.old (startropics.exe.old on
+Windows). Restart now starts the new version at once (as with Quit, play since the
+game last saved is not kept); otherwise it starts next time. The program's folder
+has to be writable for this; if it is not, download the new version from the release
+page. On Android the tab opens the release page instead: download the APK of your
+edition there and open it, and it installs over the app.
+
 Files
 -----
 saves/<rom name>.sav       battery save (the game's own save slots)
@@ -123,6 +137,7 @@ screenshots/               F12 screenshots
 startropics.ini            settings and the remembered ROM path
 retroachievements.txt      RetroAchievements session (user name + token), if logged in
 remaster.pak               your own hand-made tiles for Textures: Remastered (optional)
+startropics.old            the previous version, after an update (startropics.exe.old)
 
 These live next to startropics.exe when that folder is writable. If it is not
 (Program Files, a read-only location, or the program was started from inside

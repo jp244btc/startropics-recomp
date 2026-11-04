@@ -39,6 +39,7 @@
 #include "gpu_sync.h"
 #include "widescreen.h"
 #include "remaster.h"
+#include "update.h"
 #include "rewind.h"
 #include "achievements.h"
 #include "touchpad.h"
@@ -131,6 +132,7 @@ static int state = ST_MENU;
 static int rom_ok;                    /* a verified StarTropics ROM is loaded */
 static int game_started;              /* the machine has run since the ROM was loaded */
 static int running = 1;
+static int restart_after_quit;        /* Updates tab: start the installed version once shut down */
 
 static char base_dir[1024];           /* directory of the executable, with trailing separator */
 static char data_dir[1024];           /* settings, saves, screenshots: base_dir when writable, else the per-user folder */
@@ -182,13 +184,14 @@ static int vsync_div = 1;             /* vblanks per game frame (2 on a 120 Hz d
 static double refresh_hz;             /* reported display refresh rate, 0 if unknown */
 
 /* menu */
-enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT, ACT_RA_LOGIN,
+enum { ACT_PLAY = 1, ACT_RESET, ACT_SAVE, ACT_LOAD, ACT_STOP, ACT_QUIT, ACT_CHOOSE, ACT_KEYS_DEFAULT, ACT_RA_LOGIN, ACT_UPDATE,
        GFX_CHANGED, AUD_CHANGED, LAT_CHANGED, KEY_CHANGED, SLOT_CHANGED, RA_CHANGED, RA_TEXT };
-enum { TAB_PLAY, TAB_GFX, TAB_AUDIO, TAB_CONTROLS, TAB_RA, TAB_ROM, N_TABS };
+enum { TAB_PLAY, TAB_GFX, TAB_AUDIO, TAB_CONTROLS, TAB_RA, TAB_ROM, TAB_UPDATES, N_TABS };
 #define GFX_ROWS 14
 #define GFX_WINDOW_SIZE_ROW 2
 #define GFX_INFO_ROW 13
-static ui_item play_items[8], gfx_all[GFX_ROWS], gfx_items[GFX_ROWS], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3];
+static ui_item play_items[8], gfx_all[GFX_ROWS], gfx_items[GFX_ROWS], aud_items[3], ctl_items[K_TOTAL + 3], ra_items[7], rom_items[3],
+               upd_items[3];
 static ui_tab tabs[N_TABS];
 static ui_menu menu;
 
@@ -1566,6 +1569,25 @@ static void refresh_rom_items(void) {
     snprintf(menu.status, sizeof menu.status, "%s", rom_ok ? rom_status : "No valid ROM loaded - open the ROM tab to choose your cartridge dump");
 }
 
+/* the Updates tab: this build's version, the button for the next step and what happened so far */
+static void refresh_update_items(void) {
+    static char install_label[96];
+    const char *label = "Check for updates";
+    update_info u;
+    update_poll(&u);
+    snprintf(upd_items[0].info, sizeof upd_items[0].info, "This is version %s (%s). New versions are published on GitHub; "
+             "checking asks it for the newest release.", update_version(), update_edition());
+    if (u.state == UPD_CHECKING) label = "Checking...";
+    else if (u.state == UPD_DOWNLOADING) label = "Installing...";
+    else if (u.state == UPD_INSTALLED) label = "Restart now";
+    else if (u.state == UPD_AVAILABLE && u.can_install) {
+        snprintf(install_label, sizeof install_label, "Install version %s", u.latest);
+        label = install_label;
+    } else if (u.state == UPD_AVAILABLE) label = "Open the download page";
+    upd_items[1].label = label;
+    snprintf(upd_items[2].info, sizeof upd_items[2].info, "%s", u.text);
+}
+
 static void build_menu(void) {
     ui_item *p = play_items;
     p[0] = (ui_item){ "Start game", UI_ACTION, ACT_PLAY, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
@@ -1639,12 +1661,17 @@ static void build_menu(void) {
     rom_items[1] = (ui_item){ "Choose ROM file...", UI_ACTION, ACT_CHOOSE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
     rom_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
 
+    upd_items[0] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    upd_items[1] = (ui_item){ "Check for updates", UI_ACTION, ACT_UPDATE, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+    upd_items[2] = (ui_item){ "", UI_INFO, 0, NULL, NULL, 0, 0, 0, 0, NULL, "", NULL };
+
     tabs[TAB_PLAY] = (ui_tab){ "Play", play_items, 8, 0 };
     tabs[TAB_GFX] = (ui_tab){ "Graphics", gfx_items, GFX_ROWS, 0 };
     tabs[TAB_AUDIO] = (ui_tab){ "Audio", aud_items, 3, 0 };
     tabs[TAB_CONTROLS] = (ui_tab){ "Controls", ctl_items, K_TOTAL + 3, 0 };
     tabs[TAB_RA] = (ui_tab){ "Achievements", ra_items, ach_available() ? 7 : 1, 0 };
     tabs[TAB_ROM] = (ui_tab){ "ROM", rom_items, 3, 1 };
+    tabs[TAB_UPDATES] = (ui_tab){ "Updates", upd_items, 3, 1 };
     memset(&menu, 0, sizeof menu);
     menu.tabs = tabs; menu.ntabs = N_TABS;
     menu.title = "STARTROPICS";
@@ -1656,6 +1683,7 @@ static void build_menu(void) {
     refresh_rom_items();
     refresh_ra_items();
     refresh_gfx_info();
+    refresh_update_items();
 }
 
 static void open_menu(void) {
@@ -1722,6 +1750,15 @@ static void menu_action(ui_event e) {
         else if (!ra_user_buf[0] || !ra_pass_buf[0]) snprintf(menu.status, sizeof menu.status, "Enter your RetroAchievements user name and password first");
         else { ach_login(ra_user_buf, ra_pass_buf); memset(ra_pass_buf, 0, sizeof ra_pass_buf); }
         break;
+    case ACT_UPDATE: {
+        update_info u;
+        update_poll(&u);
+        if (u.state == UPD_AVAILABLE && u.can_install) update_install();
+        else if (u.state == UPD_AVAILABLE) SDL_OpenURL(u.page);
+        else if (u.state == UPD_INSTALLED) { restart_after_quit = 1; running = 0; }
+        else update_check();      /* nothing happens while a check or an installation runs */
+        refresh_update_items();
+        break; }
     default: break;
     }
 }
@@ -1930,7 +1967,9 @@ static void usage(void) {
     printf("usage: startropics [rom.nes] [--play] [--selftest N out.png] [--ui-shot out.png [tab [frames]]]\n"
            "                   [--game-shot out.png [frames] [--state-load state]] [--rewind-test N] [--list-controllers [out.txt]]\n"
            "                   [--list-modes [out.txt]] [--chord-test] [--trigger-test] [--stats out.txt]\n"
-           "                   [--touch] [--touch-test]\n");
+           "                   [--touch] [--touch-test] [--update-check] [--update-test VERSION [args...]]\n"
+           "  --update-check: what the Updates tab's check finds. --update-test: the same as if this build were\n"
+           "  VERSION, then installs the newest release over this program and starts it with args (scratch folders only)\n");
 }
 
 static uint64_t fb_hash(void) {
@@ -2023,6 +2062,9 @@ int main(int argc, char **argv) {
     int selftest_frames = 0, uishot_tab = 0, uishot_frames = 0, gameshot_frames = 300, rewind_test = 0, list_pads = 0, autoplay = 0;
     const char *list_modes_file = NULL;
     int list_modes_flag = 0, chord_test = 0, touch_flag = 0, touch_test = 0;
+    const char *update_pretend = NULL;
+    char **update_then = NULL, **launch_argv = argv;   /* the restart after an update runs the same command line */
+    int update_test = 0;
 #if !defined(_WIN32) && !defined(__ANDROID__)
     /* diagnostics on Linux, where a Steam shortcut has no easy command line: when started
        without options, those in args.txt next to the program (one per line) are used */
@@ -2073,8 +2115,24 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--list-modes")) { list_modes_flag = 1; if (i + 1 < argc) list_modes_file = argv[++i]; }
         else if (!strcmp(argv[i], "--stats") && i + 1 < argc) stats_path = argv[++i];
         else if (!strcmp(argv[i], "--play")) autoplay = 1;
+        else if (!strcmp(argv[i], "--update-check")) update_test = 1;
+        else if (!strcmp(argv[i], "--update-test") && i + 1 < argc) {
+            /* the rest of the line is the installed version's command line (argv itself stays as it
+               is: SDL's Windows entry point frees its strings after main returns) */
+            static char *then[34];
+            int k = 0;
+            then[k++] = argv[0];
+            for (int j = i + 2; j < argc && k < 33; j++) then[k++] = argv[j];
+            then[k] = NULL;
+            update_pretend = argv[i + 1];
+            update_then = then;
+            update_test = 1;
+            break;
+        }
         else rom_arg = argv[i];
     }
+    update_set_touch(touch_flag);
+    if (update_test) return update_selftest(update_pretend, update_then);
 
 #ifdef _WIN32
     /* work in the display's real pixels: without this Windows scales the whole window by the
@@ -2252,6 +2310,12 @@ int main(int argc, char **argv) {
     }
     if (uishot_png) {
         menu.tab = uishot_tab < N_TABS ? uishot_tab : 0; ui_select_first(&menu);
+        if (menu.tab == TAB_UPDATES) {   /* the tab as it looks after pressing its button, once the check is done */
+            menu_action((ui_event){ UI_EV_ACTIVATE, ACT_UPDATE });
+            update_info u;
+            for (int i = 0; i < 3000 && (update_poll(&u), u.state == UPD_CHECKING); i++) SDL_Delay(10);
+            refresh_update_items();
+        }
         for (int i = 0; i < uishot_frames && rom_ok; i++) { nes_run_frame(); audio_out_pump(1, cfg.volume); }
         draw_menu();
         SDL_RenderPresent(renderer);
@@ -2426,6 +2490,7 @@ int main(int argc, char **argv) {
         in_game = (state == ST_GAME && !paused);
         ach_pump();
         if (rom_ok && ach_take_reset_request()) { nes_reset(); ach_reset(); rewind_clear(); chord_clear(); osd("Game reset for hardcore mode"); }
+        if (state == ST_MENU) refresh_update_items();   /* a check or a download may be running */
 
         if (state == ST_MENU) {
             /* launcher: let the game's own intro / title / demo play with sound until a game starts */
@@ -2609,5 +2674,6 @@ int main(int argc, char **argv) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    if (restart_after_quit) update_restart(launch_argv);   /* on Linux this only returns when it failed */
     return 0;
 }

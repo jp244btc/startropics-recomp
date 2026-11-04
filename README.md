@@ -23,7 +23,7 @@ your .nes again, at run time, for CHR graphics, level data, text, music
 
 `make dist` packages a single executable (SDL2 linked statically, no DLLs) with a
 launcher in the style of the N64 recompilation projects: a tabbed menu
-(**Play / Graphics / Audio / Controls / Achievements / ROM**) over a hero backdrop. On the ROM tab
+(**Play / Graphics / Audio / Controls / Achievements / ROM / Updates**) over a hero backdrop. On the ROM tab
 "Choose ROM file..." opens the system file dialog; dropping a `.nes` file onto the
 window or passing it on the command line also works. The file's hash is checked
 and anything that is not a StarTropics dump is refused. Once a valid dump is
@@ -42,9 +42,10 @@ ratio (square pixels 8:7, 4:3 CRT, 16:9 or 16:10 widescreen: below), filter
 curvature; three strengths), overscan crop, a no-sprite-limit mode (every sprite
 on a line is drawn, so nothing flickers), remastered textures (below), volume,
 and rebinding of the eight NES buttons and the rewind key. Nine save state
-slots, rewind (hold a key to step back through the last minutes of play) and
+slots, rewind (hold a key to step back through the last minutes of play),
 RetroAchievements (log in on the Achievements tab; unlocks pop up in game;
-hardcore mode supported) are built in.
+hardcore mode supported) and updates from the GitHub releases (the Updates tab,
+below) are built in.
 A line under the Graphics rows reports the picture the settings produce and why it
 does not fill the screen when it does not (integer multiples, or a 16:9 picture on a
 16:10 screen). The window works in real pixels on high-DPI displays (per-monitor DPI
@@ -136,7 +137,10 @@ build/startropics      # looks for rom/*.nes next to the executable; or pass a p
 instructions in 430 routines for the USA dump from static analysis alone, a few
 hundred more with coverage data). Run `make recomp` again after collecting more
 coverage (below) and rebuild. `make dist` zips the executable with the player
-notes (`docs/PLAYERS.md`) into `dist/`.
+notes (`docs/PLAYERS.md`) into `dist/`. A build carries its version (`git describe`: the
+newest `v*` tag, plus the commits after it) and the GitHub repository of the checkout
+(its `origin` remote), which the Updates tab compares and downloads from;
+`make ST_VERSION=... ST_REPO=owner/name` sets them where there is no git.
 
 ### Linux and Steam Deck packages
 
@@ -144,11 +148,13 @@ notes (`docs/PLAYERS.md`) into `dist/`.
 source as a static library that loads X11, Wayland, PipeWire, PulseAudio, ALSA and
 udev at run time. The resulting binary needs only glibc 2.34+ and libm, so it runs on
 SteamOS 3 and current distributions without installing anything; libcurl (for
-RetroAchievements) is loaded at run time when present. After `make recomp`:
+RetroAchievements and updates) is loaded at run time when present. After `make recomp`
+(the container has no git, so the version and repository come in from the environment):
 
 ```
 docker build -t startropics-linux tools/linux
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/src -w /src startropics-linux sh tools/linux/build.sh
+export ST_VERSION="$(git describe --tags --match 'v[0-9]*' --dirty)" ST_REPO=owner/name
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e ST_VERSION -e ST_REPO -v "$PWD":/src -w /src startropics-linux sh tools/linux/build.sh
 ```
 
 This builds, runs the cosimulation and the frontend self-tests headless (SDL's
@@ -265,6 +271,22 @@ cartridge's own tiles it belongs with your copy of the game; none is included he
 The program loads `remaster.pak` from its own folder or its data folder (on Android,
 the app's files folder on the shared storage).
 
+### Updates
+
+**Check for updates** on the Updates tab asks GitHub for the newest release of the
+repository the build came from (nothing is contacted until it is pressed) and compares
+its tag with the build's version. On Windows, Linux and the Steam Deck, **Install
+version X** then downloads that release's package for the system, checks it against
+the SHA-256 digest GitHub lists for it, unpacks it with the system's `tar` (Windows 10
+1803 and later have one) and swaps the program file: the running program is renamed to
+`startropics.old` (`startropics.exe.old`), which both systems allow, and the new one
+takes its name, with the package's other files beside it. Settings, saves, the ROM and
+texture packs are not in the package and stay as they are. **Restart now** shuts down
+as Quit does and starts the new version; on Linux it takes over the same process, so on
+a Steam Deck the game session carries on. Android cannot replace its own package: there
+the tab opens the release page, and the downloaded APK installs over the app, keeping
+its data. `startropics --update-check` prints what a check finds.
+
 ## How it works
 
 * `recomp/recomp.py` parses the iNES header, finds code by recursive descent from
@@ -282,7 +304,8 @@ the app's files folder on the shared storage).
   what makes exact cosimulation possible. `runtime/remaster.c` colors the
   remastered textures from the PPU's per-pixel record of each pixel's source tile.
 * `frontend/sdl_main.c` is the player: window, audio, input, saves, states,
-  rewind, shaders; `frontend/achievements.c` is the RetroAchievements glue.
+  rewind, shaders; `frontend/achievements.c` is the RetroAchievements glue and
+  `frontend/update.c` the Updates tab, both over `frontend/http.c`.
 
 Details, the timing model and the exact emission rules are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -324,7 +347,7 @@ instruction that fell back to the interpreter, so repeating the cycle converges.
 ```
 recomp/        the static recompiler (Python) and symbols.txt (address labels, no game data)
 runtime/       hardware runtime + headless harness (C11)
-frontend/      SDL2 player (menu, video, audio, input, touch controls, rewind, achievements)
+frontend/      SDL2 player (menu, video, audio, input, touch controls, rewind, achievements, updates)
 android/       Android app: CMake project, manifest, activity, build_apk.py
 third_party/   rcheevos (RetroAchievements client, MIT) and its make include
 tests/         accuracy tests, cosimulation, nestest comparison, module tests
